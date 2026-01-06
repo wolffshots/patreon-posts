@@ -62,6 +62,11 @@ func main() {
 	}
 	defer database.Close()
 
+	// Seed campaigns from config if present
+	for _, campaign := range cfg.Campaigns {
+		database.SaveCampaign(campaign.ID, campaign.Name)
+	}
+
 	// Warn if no cookies provided
 	if cookies == "" {
 		fmt.Println("⚠️  No cookies provided. You may not be able to view patron-only content.")

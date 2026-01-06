@@ -119,9 +119,72 @@ func (d *Database) SaveCampaign(id, name string) error {
 		INSERT INTO campaigns (id, name, cached_at) 
 		VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET 
-			name = excluded.name,
+			name = CASE WHEN excluded.name != '' THEN excluded.name ELSE campaigns.name END,
 			cached_at = CURRENT_TIMESTAMP
 	`, id, name)
+	return err
+}
+
+// SavedCampaign represents a saved campaign for selection
+type SavedCampaign struct {
+	ID       string
+	Name     string
+	CachedAt time.Time
+}
+
+// ListCampaigns returns all saved campaigns
+func (d *Database) ListCampaigns() ([]SavedCampaign, error) {
+	rows, err := d.db.Query(`
+		SELECT id, COALESCE(name, ''), cached_at
+		FROM campaigns
+		ORDER BY cached_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var campaigns []SavedCampaign
+	for rows.Next() {
+		var c SavedCampaign
+		if err := rows.Scan(&c.ID, &c.Name, &c.CachedAt); err != nil {
+			return nil, err
+		}
+		campaigns = append(campaigns, c)
+	}
+	return campaigns, rows.Err()
+}
+
+// GetCampaign retrieves a campaign by ID
+func (d *Database) GetCampaign(id string) (*SavedCampaign, error) {
+	row := d.db.QueryRow(`
+		SELECT id, COALESCE(name, ''), cached_at
+		FROM campaigns WHERE id = ?
+	`, id)
+
+	var c SavedCampaign
+	err := row.Scan(&c.ID, &c.Name, &c.CachedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// DeleteCampaign removes a campaign and all its data
+func (d *Database) DeleteCampaign(id string) error {
+	// Delete pages first
+	if _, err := d.db.Exec(`DELETE FROM campaign_pages WHERE campaign_id = ?`, id); err != nil {
+		return err
+	}
+	// Delete posts
+	if _, err := d.db.Exec(`DELETE FROM posts WHERE campaign_id = ?`, id); err != nil {
+		return err
+	}
+	// Delete campaign
+	_, err := d.db.Exec(`DELETE FROM campaigns WHERE id = ?`, id)
 	return err
 }
 

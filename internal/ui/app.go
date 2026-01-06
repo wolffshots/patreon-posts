@@ -3,6 +3,7 @@ package ui
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -153,6 +154,7 @@ type Model struct {
 	width           int
 	height          int
 	campaignID      string
+	campaignName    string
 	loadingMsg      string
 	postDetails     *models.PostDetails
 	cachedDetails   *db.CachedPost
@@ -166,6 +168,12 @@ type Model struct {
 	cursorHistory []string // History of cursors for going back
 	totalPosts    int      // Total posts available
 	hasMorePages  bool     // Whether there are more pages
+	// Campaign selection
+	savedCampaigns []db.SavedCampaign
+	campaignCursor int             // Cursor for campaign selection
+	inputStep      int             // 0 = selection, 1 = entering ID, 2 = entering name
+	nameInput      textinput.Model // Input for campaign name
+	pendingID      string          // ID entered in step 1, waiting for name
 }
 
 // PostsFetchedMsg is sent when posts are fetched
@@ -190,6 +198,11 @@ type CacheUpdatedMsg struct {
 	Cached bool
 }
 
+// CampaignsLoadedMsg is sent when saved campaigns are loaded
+type CampaignsLoadedMsg struct {
+	Campaigns []db.SavedCampaign
+}
+
 // NewModel creates a new TUI model
 func NewModel(cookies string, database *db.Database) Model {
 	ti := textinput.New()
@@ -197,6 +210,11 @@ func NewModel(cookies string, database *db.Database) Model {
 	ti.Focus()
 	ti.CharLimit = 20
 	ti.Width = 40
+
+	ni := textinput.New()
+	ni.Placeholder = "Enter name (optional, press Enter to skip)"
+	ni.CharLimit = 50
+	ni.Width = 50
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -209,6 +227,7 @@ func NewModel(cookies string, database *db.Database) Model {
 		client:         api.NewClient(cookies),
 		database:       database,
 		input:          ti,
+		nameInput:      ni,
 		spinner:        s,
 		viewport:       vp,
 		width:          80,
@@ -221,7 +240,17 @@ func NewModel(cookies string, database *db.Database) Model {
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, m.loadCampaigns())
+}
+
+func (m Model) loadCampaigns() tea.Cmd {
+	return func() tea.Msg {
+		if m.database == nil {
+			return CampaignsLoadedMsg{Campaigns: nil}
+		}
+		campaigns, _ := m.database.ListCampaigns()
+		return CampaignsLoadedMsg{Campaigns: campaigns}
+	}
 }
 
 // Update handles messages and updates state
@@ -295,17 +324,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle state-specific keys
 		switch m.state {
 		case stateInput:
-			if msg.String() == "enter" && m.input.Value() != "" {
-				m.campaignID = m.input.Value()
-				m.currentPage = 1
-				m.cursorHistory = make([]string, 0)
-				m.state = stateLoading
-				m.loadingMsg = "Fetching posts..."
-				return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
-			}
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
+			return m.handleInputKeys(msg)
 
 		case stateList:
 			return m.handleListKeys(msg)
@@ -338,6 +357,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.nextCursor = msg.NextCursor
 		m.hasMorePages = msg.HasMore
 		m.totalPosts = msg.Total
+		// Sort posts by published date (most recent first)
+		sort.Slice(m.posts, func(i, j int) bool {
+			return m.posts[i].PublishedAt.After(m.posts[j].PublishedAt)
+		})
 		// Update cache status for each post
 		for i := range m.posts {
 			if m.database != nil {
@@ -375,6 +398,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateDetails
 		m.viewport.SetContent(m.renderDetailsContent())
 		m.viewport.GotoTop()
+		return m, nil
+
+	case CampaignsLoadedMsg:
+		m.savedCampaigns = msg.Campaigns
+		// Start in ID input mode if no saved campaigns, otherwise selection mode
+		if len(m.savedCampaigns) == 0 {
+			m.inputStep = 1
+			m.input.Focus()
+		} else {
+			m.inputStep = 0
+		}
 		return m, nil
 
 	case spinner.TickMsg:
@@ -482,8 +516,8 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.state = stateInput
 		m.input.SetValue("")
-		m.input.Focus()
-		return m, textinput.Blink
+		m.inputStep = 0
+		return m, m.loadCampaigns()
 	}
 	return m, nil
 }
@@ -580,8 +614,140 @@ func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.state = stateInput
 		m.input.SetValue("")
-		m.input.Focus()
-		return m, textinput.Blink
+		m.inputStep = 0
+		return m, m.loadCampaigns()
+	}
+	return m, nil
+}
+
+func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.inputStep {
+	case 1: // Entering campaign ID
+		switch msg.String() {
+		case "enter":
+			if m.input.Value() != "" {
+				// Move to name entry step
+				m.pendingID = m.input.Value()
+				m.inputStep = 2
+				m.input.Blur()
+				m.nameInput.SetValue("")
+				m.nameInput.Focus()
+				return m, textinput.Blink
+			}
+		case "esc":
+			// If we have saved campaigns, go back to selection mode
+			if len(m.savedCampaigns) > 0 {
+				m.inputStep = 0
+				m.input.SetValue("")
+				m.input.Blur()
+				return m, m.loadCampaigns()
+			}
+			// Otherwise quit
+			return m, tea.Quit
+		default:
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	case 2: // Entering campaign name
+		switch msg.String() {
+		case "enter":
+			// Save campaign with ID and name (name can be empty)
+			m.campaignID = m.pendingID
+			m.campaignName = m.nameInput.Value()
+			if m.database != nil {
+				m.database.SaveCampaign(m.campaignID, m.campaignName)
+			}
+			m.currentPage = 1
+			m.cursorHistory = make([]string, 0)
+			m.state = stateLoading
+			m.loadingMsg = "Fetching posts..."
+			m.nameInput.Blur()
+			m.pendingID = ""
+			return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
+		case "esc":
+			// Go back to ID entry
+			m.inputStep = 1
+			m.nameInput.Blur()
+			m.input.Focus()
+			return m, textinput.Blink
+		default:
+			var cmd tea.Cmd
+			m.nameInput, cmd = m.nameInput.Update(msg)
+			return m, cmd
+		}
+
+	default: // inputStep 0: Selection mode (choosing from saved campaigns)
+		switch msg.String() {
+		case "up", "k":
+			if m.campaignCursor > 0 {
+				m.campaignCursor--
+			}
+		case "down", "j":
+			if m.campaignCursor < len(m.savedCampaigns)-1 {
+				m.campaignCursor++
+			}
+		case "enter":
+			if len(m.savedCampaigns) > 0 {
+				selected := m.savedCampaigns[m.campaignCursor]
+				m.campaignID = selected.ID
+				m.campaignName = selected.Name
+				m.currentPage = 1
+				m.cursorHistory = make([]string, 0)
+				m.state = stateLoading
+				m.loadingMsg = "Fetching posts..."
+				return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
+			}
+		case "n", "a":
+			// Switch to input mode to add new campaign
+			m.inputStep = 1
+			m.input.SetValue("")
+			m.input.Focus()
+			return m, textinput.Blink
+		case "d", "delete":
+			// Delete selected campaign
+			if len(m.savedCampaigns) > 0 {
+				selected := m.savedCampaigns[m.campaignCursor]
+				if m.database != nil {
+					m.database.DeleteCampaign(selected.ID)
+				}
+				// Reload campaigns
+				return m, m.loadCampaigns()
+			}
+		// Clipboard operations
+		case "c", "y":
+			if len(m.clipboardLinks) > 0 {
+				allLinks := strings.Join(m.clipboardLinks, "\n")
+				clipboard.WriteAll(allLinks)
+				m.statusMessage = fmt.Sprintf("Copied %d links", len(m.clipboardLinks))
+			}
+		case "x":
+			// Remove selected link from clipboard
+			if len(m.clipboardLinks) > 0 && m.clipboardCursor < len(m.clipboardLinks) {
+				m.clipboardLinks = append(m.clipboardLinks[:m.clipboardCursor], m.clipboardLinks[m.clipboardCursor+1:]...)
+				if m.clipboardCursor >= len(m.clipboardLinks) && m.clipboardCursor > 0 {
+					m.clipboardCursor--
+				}
+			}
+		case "X":
+			// Clear entire clipboard
+			m.clipboardLinks = make([]string, 0)
+			m.clipboardCursor = 0
+		case "[":
+			// Navigate clipboard up
+			if m.clipboardCursor > 0 {
+				m.clipboardCursor--
+			}
+		case "]":
+			// Navigate clipboard down
+			if m.clipboardCursor < len(m.clipboardLinks)-1 {
+				m.clipboardCursor++
+			}
+		case "esc", "ctrl+c":
+			return m, tea.Quit
+		}
 	}
 	return m, nil
 }
@@ -748,12 +914,67 @@ func (m Model) viewInput() string {
 
 	b.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
 	b.WriteString("\n\n")
-	b.WriteString("Enter the campaign ID to fetch posts:\n\n")
-	b.WriteString(inputStyle.Render(m.input.View()))
-	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("Press Enter to fetch • Ctrl+C to quit"))
 
-	return b.String()
+	switch m.inputStep {
+	case 1: // Entering campaign ID
+		b.WriteString("Enter a new campaign ID:\n\n")
+		b.WriteString(inputStyle.Render(m.input.View()))
+		b.WriteString("\n\n")
+		if len(m.savedCampaigns) > 0 {
+			b.WriteString(helpStyle.Render("Enter to continue • Esc back to list • Ctrl+C quit"))
+		} else {
+			b.WriteString(helpStyle.Render("Enter to continue • Esc/Ctrl+C quit"))
+		}
+
+	case 2: // Entering campaign name
+		b.WriteString(fmt.Sprintf("Campaign ID: %s\n\n", m.pendingID))
+		b.WriteString("Enter a name for this campaign (optional):\n\n")
+		b.WriteString(inputStyle.Render(m.nameInput.View()))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("Enter to save & fetch • Esc back to ID entry"))
+
+	default: // inputStep 0: Selection mode
+		if len(m.savedCampaigns) > 0 {
+			b.WriteString("Select a campaign:\n\n")
+
+			for i, campaign := range m.savedCampaigns {
+				displayName := campaign.ID
+				if campaign.Name != "" {
+					displayName = fmt.Sprintf("%s (%s)", campaign.Name, campaign.ID)
+				}
+
+				if i == m.campaignCursor {
+					b.WriteString(selectedStyle.Render(fmt.Sprintf(" ▶ %s ", displayName)))
+				} else {
+					b.WriteString(normalStyle.Render(fmt.Sprintf("   %s", displayName)))
+				}
+				b.WriteString("\n")
+			}
+
+			b.WriteString("\n")
+			helpText := "↑/k ↓/j nav • Enter select • n/a new • d delete • Esc quit"
+			if len(m.clipboardLinks) > 0 {
+				helpText += " • c copy • x remove • X clear"
+			}
+			b.WriteString(helpStyle.Render(helpText))
+		} else {
+			b.WriteString("No saved campaigns.\n\n")
+			b.WriteString("Enter a campaign ID:\n\n")
+			b.WriteString(inputStyle.Render(m.input.View()))
+			b.WriteString("\n\n")
+			b.WriteString(helpStyle.Render("Enter to continue • Esc/Ctrl+C quit"))
+		}
+	}
+
+	mainContent := b.String()
+
+	// If we have clipboard entries, show the panel
+	if len(m.clipboardLinks) > 0 {
+		clipboardPanel := m.renderClipboardPanel(m.height-4, 2)
+		return lipgloss.JoinHorizontal(lipgloss.Top, mainContent, "  ", clipboardPanel)
+	}
+
+	return mainContent
 }
 
 func (m Model) viewLoading() string {

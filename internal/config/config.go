@@ -7,9 +7,16 @@ import (
 	"path/filepath"
 )
 
+// Campaign represents a saved campaign
+type Campaign struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // Config holds the application configuration
 type Config struct {
-	Cookies string `json:"cookies"`
+	Cookies   string     `json:"cookies"`
+	Campaigns []Campaign `json:"campaigns,omitempty"`
 }
 
 // DefaultConfigPath returns the default config file path

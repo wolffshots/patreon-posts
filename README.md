@@ -38,9 +38,15 @@ Create a config file at `~/.patreon-posts.json`:
 
 ```json
 {
-  "cookies": "session_id=YOUR_SESSION_ID; patreon_device_id=YOUR_DEVICE_ID"
+  "cookies": "session_id=YOUR_SESSION_ID; patreon_device_id=YOUR_DEVICE_ID",
+  "campaigns": [
+    { "id": "2175699", "name": "Hat Films" },
+    { "id": "1234567", "name": "Another Creator" }
+  ]
 }
 ```
+
+The `campaigns` array is optional and seeds the database with saved campaigns that appear in the selection list.
 
 Then simply run:
 
@@ -50,8 +56,8 @@ Then simply run:
 
 ### Data Storage
 
-- **Config file**: `~/.patreon-posts.json` - Stores your cookies
-- **Database**: `~/.patreon-posts.db` - SQLite cache for posts and details
+- **Config file**: `~/.patreon-posts.json` - Stores cookies and campaign seeds
+- **Database**: `~/.patreon-posts.db` - SQLite cache for posts, pages, and saved campaigns
 
 ### Getting Your Cookies
 
@@ -67,6 +73,21 @@ Then simply run:
 
 ## Controls
 
+### Campaign Selection
+
+When you start the app, you'll see a list of saved campaigns (if any):
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move up |
+| `↓` / `j` | Move down |
+| `Enter` | Select campaign and load posts |
+| `n` / `a` | Add new campaign (enter ID manually) |
+| `d` / `Delete` | Delete selected campaign |
+| `Esc` / `Ctrl+C` | Quit |
+
+Campaigns are automatically saved when you fetch posts from them.
+
 ### Posts List
 
 | Key | Action |
@@ -74,13 +95,15 @@ Then simply run:
 | `↑` / `k` | Move up |
 | `↓` / `j` | Move down |
 | `Enter` | View post details (fetches & caches YouTube links) |
-| `r` | Refresh posts |
-| `R` | **Force refresh** (bypass cache) |
+| `n` / `→` / `l` | Next page |
+| `p` / `←` / `h` | Previous page |
+| `r` | Refresh current page |
+| `R` | **Force refresh** (clear cache, back to page 1) |
 | `c` / `y` | Copy clipboard links to system clipboard |
 | `x` | Remove selected link from clipboard |
 | `X` | Clear entire clipboard |
 | `[` / `]` | Navigate clipboard |
-| `Esc` | Go back to campaign input |
+| `Esc` | Go back to campaign selection |
 | `q` / `Ctrl+C` | Quit |
 
 ### Post Details View
