@@ -4,7 +4,30 @@ import "time"
 
 // PatreonResponse represents the top-level API response
 type PatreonResponse struct {
-	Data []PostData `json:"data"`
+	Data  []PostData      `json:"data"`
+	Meta  PaginationMeta  `json:"meta"`
+	Links PaginationLinks `json:"links"`
+}
+
+// PaginationMeta contains pagination metadata
+// Patreon returns: {"meta": {"posts_count": N, "request_join_key": "..."}}
+type PaginationMeta struct {
+	PostsCount int `json:"posts_count"`
+}
+
+// PaginationLinks contains URL links for pagination
+// Patreon returns: {"links": {"next": "https://...?page[cursor]=...", "first": "..."}}
+type PaginationLinks struct {
+	Next  string `json:"next"`
+	First string `json:"first"`
+}
+
+// PostsPage represents a page of posts with pagination info
+type PostsPage struct {
+	Posts      []Post
+	NextCursor string
+	HasMore    bool
+	Total      int
 }
 
 // PostData represents a single post in the response

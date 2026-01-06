@@ -37,8 +37,9 @@ func NewClient(cookies string) *Client {
 	}
 }
 
-// FetchPosts retrieves posts for a given campaign ID
-func (c *Client) FetchPosts(campaignID string, count int) ([]models.Post, error) {
+// FetchPosts retrieves posts for a given campaign ID with pagination support
+// cursor can be empty string or "null" for the first page
+func (c *Client) FetchPosts(campaignID string, count int, cursor string) (*models.PostsPage, error) {
 	endpoint := fmt.Sprintf("%s/campaigns/%s/posts", baseURL, campaignID)
 
 	params := url.Values{}
@@ -50,7 +51,14 @@ func (c *Client) FetchPosts(campaignID string, count int) ([]models.Post, error)
 	params.Set("fields[campaign]", "[]")
 	params.Set("fields[pledge]", "amount_cents")
 	params.Set("fields[primary-image]", "image_icon,image_small,image_medium,image_large,primary_image_type,alt_text,image_colors,is_fallback,prefer_alternate_display,id")
-	params.Set("page[cursor]", "null")
+
+	// Handle cursor for pagination
+	if cursor == "" {
+		params.Set("page[cursor]", "null")
+	} else {
+		params.Set("page[cursor]", cursor)
+	}
+
 	params.Set("page[count]", fmt.Sprintf("%d", count))
 	params.Set("filter[is_by_creator]", "true")
 	params.Set("filter[contains_exclusive_posts]", "true")
@@ -93,7 +101,34 @@ func (c *Client) FetchPosts(campaignID string, count int) ([]models.Post, error)
 		posts[i] = models.FromPostData(data)
 	}
 
-	return posts, nil
+	// Extract cursor from links.next URL if present
+	nextCursor := extractCursorFromURL(patreonResp.Links.Next)
+	hasMore := patreonResp.Links.Next != ""
+
+	page := &models.PostsPage{
+		Posts:      posts,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+		Total:      0, // Patreon doesn't provide total count
+	}
+
+	return page, nil
+}
+
+// extractCursorFromURL parses the page[cursor] parameter from a Patreon next URL
+func extractCursorFromURL(nextURL string) string {
+	if nextURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(nextURL)
+	if err != nil {
+		return ""
+	}
+
+	// Get the page[cursor] query parameter
+	cursor := parsed.Query().Get("page[cursor]")
+	return cursor
 }
 
 // FetchPostDetails retrieves the full content of a single post

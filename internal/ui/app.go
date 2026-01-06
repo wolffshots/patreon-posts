@@ -160,12 +160,21 @@ type Model struct {
 	clipboardCursor int      // Cursor position in clipboard
 	linkCursor      int      // Cursor for YouTube links in details view
 	statusMessage   string   // Temporary status message
+	// Pagination
+	currentPage   int      // Current page number (1-indexed for display)
+	nextCursor    string   // Cursor for next page
+	cursorHistory []string // History of cursors for going back
+	totalPosts    int      // Total posts available
+	hasMorePages  bool     // Whether there are more pages
 }
 
 // PostsFetchedMsg is sent when posts are fetched
 type PostsFetchedMsg struct {
-	Posts []models.Post
-	Err   error
+	Posts      []models.Post
+	NextCursor string
+	HasMore    bool
+	Total      int
+	Err        error
 }
 
 // PostDetailsFetchedMsg is sent when post details are fetched
@@ -204,6 +213,8 @@ func NewModel(cookies string, database *db.Database) Model {
 		width:          80,
 		height:         24,
 		clipboardLinks: make([]string, 0),
+		cursorHistory:  make([]string, 0),
+		currentPage:    1,
 	}
 }
 
@@ -285,9 +296,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateInput:
 			if msg.String() == "enter" && m.input.Value() != "" {
 				m.campaignID = m.input.Value()
+				m.currentPage = 1
+				m.cursorHistory = make([]string, 0)
 				m.state = stateLoading
 				m.loadingMsg = "Fetching posts..."
-				return m, tea.Batch(m.spinner.Tick, m.fetchPosts(false))
+				return m, tea.Batch(m.spinner.Tick, m.fetchPosts(""))
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
@@ -321,6 +334,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.posts = msg.Posts
+		m.nextCursor = msg.NextCursor
+		m.hasMorePages = msg.HasMore
+		m.totalPosts = msg.Total
 		// Update cache status for each post
 		for i := range m.posts {
 			if m.database != nil {
@@ -412,15 +428,50 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.spinner.Tick, m.fetchPostDetails(post.ID))
 		}
 	case "r":
-		// Refresh (use cache)
+		// Refresh current page
 		m.state = stateLoading
 		m.loadingMsg = "Refreshing posts..."
-		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(false))
+		// Get the cursor for the current page (empty for page 1, last history item otherwise)
+		cursor := ""
+		if m.currentPage > 1 && len(m.cursorHistory) > 0 {
+			cursor = m.cursorHistory[len(m.cursorHistory)-1]
+		}
+		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor))
 	case "R":
-		// Force refresh (bypass cache)
+		// Force refresh - go back to page 1
+		m.currentPage = 1
+		m.cursorHistory = make([]string, 0)
 		m.state = stateLoading
 		m.loadingMsg = "Force refreshing posts..."
-		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(true))
+		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(""))
+	case "n", "l", "right":
+		// Next page
+		if m.hasMorePages && m.nextCursor != "" {
+			// Save current cursor to history for going back
+			if m.currentPage == 1 {
+				m.cursorHistory = append(m.cursorHistory, "")
+			}
+			m.cursorHistory = append(m.cursorHistory, m.nextCursor)
+			m.currentPage++
+			m.state = stateLoading
+			m.loadingMsg = fmt.Sprintf("Loading page %d...", m.currentPage)
+			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(m.nextCursor))
+		}
+	case "p", "h", "left":
+		// Previous page
+		if m.currentPage > 1 && len(m.cursorHistory) > 0 {
+			m.currentPage--
+			// Pop the current cursor from history
+			m.cursorHistory = m.cursorHistory[:len(m.cursorHistory)-1]
+			// Get the previous cursor
+			cursor := ""
+			if len(m.cursorHistory) > 0 {
+				cursor = m.cursorHistory[len(m.cursorHistory)-1]
+			}
+			m.state = stateLoading
+			m.loadingMsg = fmt.Sprintf("Loading page %d...", m.currentPage)
+			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor))
+		}
 	case "esc":
 		m.state = stateInput
 		m.input.SetValue("")
@@ -513,7 +564,12 @@ func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.state = stateLoading
 		m.loadingMsg = "Retrying..."
-		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(false))
+		// Retry with current page's cursor
+		cursor := ""
+		if m.currentPage > 1 && len(m.cursorHistory) > 0 {
+			cursor = m.cursorHistory[len(m.cursorHistory)-1]
+		}
+		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor))
 	case "esc":
 		m.state = stateInput
 		m.input.SetValue("")
@@ -523,9 +579,9 @@ func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) fetchPosts(forceRefresh bool) tea.Cmd {
+func (m Model) fetchPosts(cursor string) tea.Cmd {
 	return func() tea.Msg {
-		posts, err := m.client.FetchPosts(m.campaignID, 20)
+		page, err := m.client.FetchPosts(m.campaignID, 20, cursor)
 		if err != nil {
 			return PostsFetchedMsg{Err: err}
 		}
@@ -533,7 +589,7 @@ func (m Model) fetchPosts(forceRefresh bool) tea.Cmd {
 		// Save campaign and posts to cache
 		if m.database != nil {
 			m.database.SaveCampaign(m.campaignID, "")
-			for _, post := range posts {
+			for _, post := range page.Posts {
 				cachedPost := &db.CachedPost{
 					ID:                 post.ID,
 					CampaignID:         m.campaignID,
@@ -548,7 +604,12 @@ func (m Model) fetchPosts(forceRefresh bool) tea.Cmd {
 			}
 		}
 
-		return PostsFetchedMsg{Posts: posts}
+		return PostsFetchedMsg{
+			Posts:      page.Posts,
+			NextCursor: page.NextCursor,
+			HasMore:    page.HasMore,
+			Total:      page.Total,
+		}
 	}
 }
 
@@ -683,7 +744,16 @@ func (m Model) viewList() string {
 
 	main.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
 	main.WriteString("\n")
-	main.WriteString(statusBarStyle.Render(fmt.Sprintf("Campaign: %s • Posts: %d", m.campaignID, len(m.posts))))
+	// Build status with pagination info
+	pageInfo := fmt.Sprintf("Page %d", m.currentPage)
+	if m.hasMorePages {
+		pageInfo += " →"
+	}
+	if m.currentPage > 1 {
+		pageInfo = "← " + pageInfo
+	}
+	pageInfo += fmt.Sprintf(" (%d posts)", len(m.posts))
+	main.WriteString(statusBarStyle.Render(fmt.Sprintf("Campaign: %s • %s", m.campaignID, pageInfo)))
 	main.WriteString("\n\n")
 
 	// Header with cache column - adjust widths for narrower main panel
@@ -774,7 +844,7 @@ func (m Model) viewList() string {
 		main.WriteString(fmt.Sprintf("  Published: %s\n", selected.PublishedAt.Format("2006-01-02 15:04")))
 	}
 
-	main.WriteString(helpStyle.Render("↑/k ↓/j nav • Enter view • r/R refresh • c copy • esc back • q quit"))
+	main.WriteString(helpStyle.Render("↑/k ↓/j nav • Enter view • n/→ p/← pages • r/R refresh • c copy • q quit"))
 
 	// Render clipboard panel (4 lines padding to align with title + status + header)
 	clipboardPanel := m.renderClipboardPanel(m.height, 4)
