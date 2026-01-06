@@ -175,6 +175,7 @@ type PostsFetchedMsg struct {
 	HasMore    bool
 	Total      int
 	Err        error
+	FromCache  bool
 }
 
 // PostDetailsFetchedMsg is sent when post details are fetched
@@ -300,7 +301,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursorHistory = make([]string, 0)
 				m.state = stateLoading
 				m.loadingMsg = "Fetching posts..."
-				return m, tea.Batch(m.spinner.Tick, m.fetchPosts(""))
+				return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
@@ -346,6 +347,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateList
 		m.cursor = 0
+		if msg.FromCache {
+			m.statusMessage = "📦 Loaded from cache"
+		}
 		return m, nil
 
 	case PostDetailsFetchedMsg:
@@ -428,7 +432,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.spinner.Tick, m.fetchPostDetails(post.ID))
 		}
 	case "r":
-		// Refresh current page
+		// Refresh current page (from cache if available)
 		m.state = stateLoading
 		m.loadingMsg = "Refreshing posts..."
 		// Get the cursor for the current page (empty for page 1, last history item otherwise)
@@ -436,14 +440,17 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.currentPage > 1 && len(m.cursorHistory) > 0 {
 			cursor = m.cursorHistory[len(m.cursorHistory)-1]
 		}
-		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor))
+		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor, false))
 	case "R":
-		// Force refresh - go back to page 1
+		// Force refresh - clear cache and go back to page 1
+		if m.database != nil {
+			m.database.ClearCampaignPages(m.campaignID)
+		}
 		m.currentPage = 1
 		m.cursorHistory = make([]string, 0)
 		m.state = stateLoading
 		m.loadingMsg = "Force refreshing posts..."
-		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(""))
+		return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", true))
 	case "n", "l", "right":
 		// Next page
 		if m.hasMorePages && m.nextCursor != "" {
@@ -455,7 +462,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.currentPage++
 			m.state = stateLoading
 			m.loadingMsg = fmt.Sprintf("Loading page %d...", m.currentPage)
-			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(m.nextCursor))
+			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(m.nextCursor, false))
 		}
 	case "p", "h", "left":
 		// Previous page
@@ -470,7 +477,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.state = stateLoading
 			m.loadingMsg = fmt.Sprintf("Loading page %d...", m.currentPage)
-			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor))
+			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor, false))
 		}
 	case "esc":
 		m.state = stateInput
@@ -564,12 +571,12 @@ func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.state = stateLoading
 		m.loadingMsg = "Retrying..."
-		// Retry with current page's cursor
+		// Retry with current page's cursor (bypass cache on retry)
 		cursor := ""
 		if m.currentPage > 1 && len(m.cursorHistory) > 0 {
 			cursor = m.cursorHistory[len(m.cursorHistory)-1]
 		}
-		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor))
+		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor, true))
 	case "esc":
 		m.state = stateInput
 		m.input.SetValue("")
@@ -579,8 +586,27 @@ func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) fetchPosts(cursor string) tea.Cmd {
+func (m Model) fetchPosts(cursor string, forceRefresh bool) tea.Cmd {
 	return func() tea.Msg {
+		// Check cache first (unless force refresh)
+		if !forceRefresh && m.database != nil {
+			cachedPage, err := m.database.GetPage(m.campaignID, cursor)
+			if err == nil && cachedPage != nil {
+				// Parse the cached posts JSON
+				var posts []models.Post
+				if err := json.Unmarshal([]byte(cachedPage.PostsJSON), &posts); err == nil {
+					return PostsFetchedMsg{
+						Posts:      posts,
+						NextCursor: cachedPage.NextCursor,
+						HasMore:    cachedPage.HasMore,
+						Total:      0,
+						FromCache:  true,
+					}
+				}
+			}
+		}
+
+		// Fetch from API
 		page, err := m.client.FetchPosts(m.campaignID, 20, cursor)
 		if err != nil {
 			return PostsFetchedMsg{Err: err}
@@ -589,6 +615,8 @@ func (m Model) fetchPosts(cursor string) tea.Cmd {
 		// Save campaign and posts to cache
 		if m.database != nil {
 			m.database.SaveCampaign(m.campaignID, "")
+
+			// Save individual posts
 			for _, post := range page.Posts {
 				cachedPost := &db.CachedPost{
 					ID:                 post.ID,
@@ -602,6 +630,10 @@ func (m Model) fetchPosts(cursor string) tea.Cmd {
 				}
 				m.database.SavePost(cachedPost)
 			}
+
+			// Save the page to cache
+			postsJSON, _ := json.Marshal(page.Posts)
+			m.database.SavePage(m.campaignID, cursor, string(postsJSON), page.NextCursor, page.HasMore)
 		}
 
 		return PostsFetchedMsg{
@@ -609,6 +641,7 @@ func (m Model) fetchPosts(cursor string) tea.Cmd {
 			NextCursor: page.NextCursor,
 			HasMore:    page.HasMore,
 			Total:      page.Total,
+			FromCache:  false,
 		}
 	}
 }

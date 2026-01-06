@@ -93,6 +93,17 @@ func (d *Database) migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_posts_campaign ON posts(campaign_id);
+
+	CREATE TABLE IF NOT EXISTS campaign_pages (
+		campaign_id TEXT NOT NULL,
+		cursor TEXT NOT NULL,
+		posts_json TEXT NOT NULL,
+		next_cursor TEXT,
+		has_more BOOLEAN,
+		cached_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (campaign_id, cursor),
+		FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+	);
 	`
 
 	_, err := d.db.Exec(schema)
@@ -259,5 +270,67 @@ func (d *Database) ClearPostDetails(postID string) error {
 			details_cached = FALSE
 		WHERE id = ?
 	`, postID)
+	return err
+}
+
+// CachedPage represents a cached page of posts
+type CachedPage struct {
+	CampaignID string
+	Cursor     string
+	PostsJSON  string
+	NextCursor string
+	HasMore    bool
+	CachedAt   time.Time
+}
+
+// SavePage saves a page of posts to the cache
+func (d *Database) SavePage(campaignID, cursor, postsJSON, nextCursor string, hasMore bool) error {
+	_, err := d.db.Exec(`
+		INSERT INTO campaign_pages (campaign_id, cursor, posts_json, next_cursor, has_more, cached_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(campaign_id, cursor) DO UPDATE SET
+			posts_json = excluded.posts_json,
+			next_cursor = excluded.next_cursor,
+			has_more = excluded.has_more,
+			cached_at = CURRENT_TIMESTAMP
+	`, campaignID, cursor, postsJSON, nextCursor, hasMore)
+	return err
+}
+
+// GetPage retrieves a cached page of posts
+func (d *Database) GetPage(campaignID, cursor string) (*CachedPage, error) {
+	row := d.db.QueryRow(`
+		SELECT campaign_id, cursor, posts_json, next_cursor, has_more, cached_at
+		FROM campaign_pages
+		WHERE campaign_id = ? AND cursor = ?
+	`, campaignID, cursor)
+
+	var page CachedPage
+	var nextCursor sql.NullString
+
+	err := row.Scan(&page.CampaignID, &page.Cursor, &page.PostsJSON, &nextCursor, &page.HasMore, &page.CachedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if nextCursor.Valid {
+		page.NextCursor = nextCursor.String
+	}
+
+	return &page, nil
+}
+
+// ClearCampaignPages clears all cached pages for a campaign
+func (d *Database) ClearCampaignPages(campaignID string) error {
+	_, err := d.db.Exec(`DELETE FROM campaign_pages WHERE campaign_id = ?`, campaignID)
+	return err
+}
+
+// ClearPage clears a specific cached page
+func (d *Database) ClearPage(campaignID, cursor string) error {
+	_, err := d.db.Exec(`DELETE FROM campaign_pages WHERE campaign_id = ? AND cursor = ?`, campaignID, cursor)
 	return err
 }
