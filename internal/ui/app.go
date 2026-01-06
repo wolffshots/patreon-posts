@@ -772,8 +772,8 @@ func (m Model) fetchPosts(cursor string, forceRefresh bool) tea.Cmd {
 			}
 		}
 
-		// Fetch from API
-		page, err := m.client.FetchPosts(m.campaignID, 20, cursor)
+		// Fetch from API (empty string for publishedAfter = no date filter)
+		page, err := m.client.FetchPosts(m.campaignID, 20, cursor, "")
 		if err != nil {
 			return PostsFetchedMsg{Err: err}
 		}

@@ -39,18 +39,15 @@ func NewClient(cookies string) *Client {
 
 // FetchPosts retrieves posts for a given campaign ID with pagination support
 // cursor can be empty string or "null" for the first page
-func (c *Client) FetchPosts(campaignID string, count int, cursor string) (*models.PostsPage, error) {
+// publishedAfter filters posts to only those published after this date (RFC3339 format, e.g. "2024-01-01T00:00:00Z")
+func (c *Client) FetchPosts(campaignID string, count int, cursor string, publishedAfter string) (*models.PostsPage, error) {
 	endpoint := fmt.Sprintf("%s/campaigns/%s/posts", baseURL, campaignID)
 
 	params := url.Values{}
-	params.Set("include", "user.campaign.current_user_pledge,access_rules.tier.null,moderator_actions,primary_image")
-	params.Set("fields[post]", "commenter_count,current_user_can_view,image,thumbnail,insights_last_updated_at,patreon_url,post_type,published_at,title,upgrade_url,view_count,is_preview_blurred")
-	params.Set("fields[access_rule]", "access_rule_type")
-	params.Set("fields[reward]", "amount_cents,id")
-	params.Set("fields[user]", "[]")
-	params.Set("fields[campaign]", "[]")
-	params.Set("fields[pledge]", "amount_cents")
-	params.Set("fields[primary-image]", "image_icon,image_small,image_medium,image_large,primary_image_type,alt_text,image_colors,is_fallback,prefer_alternate_display,id")
+	// Only request the fields we actually use
+	params.Set("fields[post]", "current_user_can_view,patreon_url,post_type,published_at,title")
+	// No includes needed - we don't use any related data
+	params.Set("json-api-use-default-includes", "false")
 
 	// Handle cursor for pagination
 	if cursor == "" {
@@ -62,8 +59,14 @@ func (c *Client) FetchPosts(campaignID string, count int, cursor string) (*model
 	params.Set("page[count]", fmt.Sprintf("%d", count))
 	params.Set("filter[is_by_creator]", "true")
 	params.Set("filter[contains_exclusive_posts]", "true")
-	params.Set("sort", "-recency_weighted_engagement")
-	params.Set("json-api-use-default-includes", "false")
+
+	// Filter by published date if specified
+	if publishedAfter != "" {
+		params.Set("filter[published_at][gte]", publishedAfter)
+	}
+
+	// Sort by most recent first
+	params.Set("sort", "-published_at")
 	params.Set("json-api-version", "1.0")
 
 	fullURL := fmt.Sprintf("%s?%s", endpoint, params.Encode())
