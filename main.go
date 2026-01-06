@@ -17,6 +17,7 @@ func main() {
 	cookiesFlag := flag.String("cookies", "", "Patreon session cookies (or set via config file)")
 	configPath := flag.String("config", "", "Path to config file (default: ~/.patreon-posts.json)")
 	dbPath := flag.String("db", "", "Path to SQLite database (default: ~/.patreon-posts.db)")
+	afterFlag := flag.String("after", "", "Only show posts published after this date (YYYY-MM-DD)")
 	flag.Parse()
 
 	// Determine config path
@@ -67,6 +68,12 @@ func main() {
 		database.SaveCampaign(campaign.ID, campaign.Name)
 	}
 
+	// Use published_after from flag or config
+	publishedAfter := *afterFlag
+	if publishedAfter == "" {
+		publishedAfter = cfg.PublishedAfter
+	}
+
 	// Warn if no cookies provided
 	if cookies == "" {
 		fmt.Println("⚠️  No cookies provided. You may not be able to view patron-only content.")
@@ -74,7 +81,7 @@ func main() {
 	}
 
 	// Create and run the TUI
-	model := ui.NewModel(cookies, database)
+	model := ui.NewModel(cookies, database, publishedAfter)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -25,7 +26,7 @@ var (
 			Foreground(lipgloss.Color("#FF424D")).
 			Background(lipgloss.Color("#1a1a2e")).
 			Padding(0, 2).
-			MarginBottom(1)
+			MarginBottom(0)
 
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -169,11 +170,14 @@ type Model struct {
 	totalPosts    int      // Total posts available
 	hasMorePages  bool     // Whether there are more pages
 	// Campaign selection
-	savedCampaigns []db.SavedCampaign
-	campaignCursor int             // Cursor for campaign selection
-	inputStep      int             // 0 = selection, 1 = entering ID, 2 = entering name
-	nameInput      textinput.Model // Input for campaign name
-	pendingID      string          // ID entered in step 1, waiting for name
+	savedCampaigns  []db.SavedCampaign
+	campaignCursor  int             // Cursor for campaign selection
+	inputStep       int             // 0 = selection, 1 = entering ID, 2 = entering name, 3 = entering date
+	nameInput       textinput.Model // Input for campaign name
+	dateInput       textinput.Model // Input for date filter
+	pendingID       string          // ID entered in step 1, waiting for name
+	publishedAfter  string          // Date filter (YYYY-MM-DD format)
+	editingDateOnly bool            // True when editing date from selection screen
 }
 
 // PostsFetchedMsg is sent when posts are fetched
@@ -204,7 +208,7 @@ type CampaignsLoadedMsg struct {
 }
 
 // NewModel creates a new TUI model
-func NewModel(cookies string, database *db.Database) Model {
+func NewModel(cookies string, database *db.Database, publishedAfter string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Enter campaign ID (e.g., 2175699)"
 	ti.Focus()
@@ -215,6 +219,11 @@ func NewModel(cookies string, database *db.Database) Model {
 	ni.Placeholder = "Enter name (optional, press Enter to skip)"
 	ni.CharLimit = 50
 	ni.Width = 50
+
+	di := textinput.New()
+	di.Placeholder = "YYYY-MM-DD (optional, press Enter to skip)"
+	di.CharLimit = 10
+	di.Width = 40
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -228,6 +237,7 @@ func NewModel(cookies string, database *db.Database) Model {
 		database:       database,
 		input:          ti,
 		nameInput:      ni,
+		dateInput:      di,
 		spinner:        s,
 		viewport:       vp,
 		width:          80,
@@ -235,6 +245,7 @@ func NewModel(cookies string, database *db.Database) Model {
 		clipboardLinks: make([]string, 0),
 		cursorHistory:  make([]string, 0),
 		currentPage:    1,
+		publishedAfter: publishedAfter,
 	}
 }
 
@@ -357,6 +368,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.nextCursor = msg.NextCursor
 		m.hasMorePages = msg.HasMore
 		m.totalPosts = msg.Total
+
+		// Client-side date filtering
+		if m.publishedAfter != "" {
+			filterDate, err := time.Parse("2006-01-02", m.publishedAfter)
+			if err == nil {
+				var filtered []models.Post
+				for _, post := range m.posts {
+					if post.PublishedAt.After(filterDate) || post.PublishedAt.Equal(filterDate) {
+						filtered = append(filtered, post)
+					}
+				}
+				m.posts = filtered
+			}
+		}
+
 		// Sort posts by published date (most recent first)
 		sort.Slice(m.posts, func(i, j int) bool {
 			return m.posts[i].PublishedAt.After(m.posts[j].PublishedAt)
@@ -457,7 +483,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.state = stateDetails
 					m.viewport.SetContent(m.renderDetailsContent())
 					m.viewport.GotoTop()
-					return m, nil
+					return m, tea.ClearScreen
 				}
 			}
 			// Fetch from API
@@ -487,7 +513,13 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", true))
 	case "n", "l", "right":
 		// Next page
-		if m.hasMorePages && m.nextCursor != "" {
+		// Don't allow next page if filter is active and we have fewer posts than page size
+		// (indicates the filter removed posts, not that there are no more pages)
+		canGoNext := m.hasMorePages && m.nextCursor != ""
+		if m.publishedAfter != "" && len(m.posts) < 20 {
+			canGoNext = false
+		}
+		if canGoNext {
 			// Save current cursor to history for going back
 			if m.currentPage == 1 {
 				m.cursorHistory = append(m.cursorHistory, "")
@@ -654,19 +686,13 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case 2: // Entering campaign name
 		switch msg.String() {
 		case "enter":
-			// Save campaign with ID and name (name can be empty)
-			m.campaignID = m.pendingID
+			// Move to date filter step
 			m.campaignName = m.nameInput.Value()
-			if m.database != nil {
-				m.database.SaveCampaign(m.campaignID, m.campaignName)
-			}
-			m.currentPage = 1
-			m.cursorHistory = make([]string, 0)
-			m.state = stateLoading
-			m.loadingMsg = "Fetching posts..."
+			m.inputStep = 3
 			m.nameInput.Blur()
-			m.pendingID = ""
-			return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
+			m.dateInput.SetValue(m.publishedAfter)
+			m.dateInput.Focus()
+			return m, textinput.Blink
 		case "esc":
 			// Go back to ID entry
 			m.inputStep = 1
@@ -676,6 +702,49 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			var cmd tea.Cmd
 			m.nameInput, cmd = m.nameInput.Update(msg)
+			return m, cmd
+		}
+
+	case 3: // Entering date filter
+		switch msg.String() {
+		case "enter":
+			m.publishedAfter = m.dateInput.Value()
+			m.dateInput.Blur()
+
+			if m.editingDateOnly {
+				// Just editing the filter, go back to selection
+				m.inputStep = 0
+				m.editingDateOnly = false
+				return m, nil
+			}
+
+			// Adding a new campaign - save it and fetch posts
+			m.campaignID = m.pendingID
+			if m.database != nil {
+				m.database.SaveCampaign(m.campaignID, m.campaignName)
+			}
+			m.currentPage = 1
+			m.cursorHistory = make([]string, 0)
+			m.state = stateLoading
+			m.loadingMsg = "Fetching posts..."
+			m.pendingID = ""
+			return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
+		case "esc":
+			if m.editingDateOnly {
+				// Go back to selection mode
+				m.inputStep = 0
+				m.dateInput.Blur()
+				m.editingDateOnly = false
+				return m, nil
+			}
+			// Go back to name entry
+			m.inputStep = 2
+			m.dateInput.Blur()
+			m.nameInput.Focus()
+			return m, textinput.Blink
+		default:
+			var cmd tea.Cmd
+			m.dateInput, cmd = m.dateInput.Update(msg)
 			return m, cmd
 		}
 
@@ -716,6 +785,13 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Reload campaigns
 				return m, m.loadCampaigns()
 			}
+		case "f":
+			// Edit date filter
+			m.inputStep = 3
+			m.editingDateOnly = true
+			m.dateInput.SetValue(m.publishedAfter)
+			m.dateInput.Focus()
+			return m, textinput.Blink
 		// Clipboard operations
 		case "c", "y":
 			if len(m.clipboardLinks) > 0 {
@@ -772,8 +848,8 @@ func (m Model) fetchPosts(cursor string, forceRefresh bool) tea.Cmd {
 			}
 		}
 
-		// Fetch from API (empty string for publishedAfter = no date filter)
-		page, err := m.client.FetchPosts(m.campaignID, 20, cursor, "")
+		// Fetch from API
+		page, err := m.client.FetchPosts(m.campaignID, 20, cursor)
 		if err != nil {
 			return PostsFetchedMsg{Err: err}
 		}
@@ -910,6 +986,10 @@ func (m Model) View() string {
 }
 
 func (m Model) viewInput() string {
+	mainWidth := m.width - clipboardPanelWidth - 3
+	if mainWidth < 40 {
+		mainWidth = 40
+	}
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
@@ -931,7 +1011,28 @@ func (m Model) viewInput() string {
 		b.WriteString("Enter a name for this campaign (optional):\n\n")
 		b.WriteString(inputStyle.Render(m.nameInput.View()))
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("Enter to save & fetch • Esc back to ID entry"))
+		b.WriteString(helpStyle.Render("Enter to continue • Esc back to ID entry"))
+
+	case 3: // Entering date filter
+		if m.editingDateOnly {
+			b.WriteString("Edit date filter:\n\n")
+		} else {
+			b.WriteString(fmt.Sprintf("Campaign ID: %s\n", m.pendingID))
+			if m.campaignName != "" {
+				b.WriteString(fmt.Sprintf("Name: %s\n\n", m.campaignName))
+			} else {
+				b.WriteString("\n")
+			}
+			b.WriteString("Filter posts after date (optional):\n\n")
+		}
+		b.WriteString(inputStyle.Render(m.dateInput.View()))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("Format: YYYY-MM-DD • Enter to " + func() string {
+			if m.editingDateOnly {
+				return "save"
+			}
+			return "fetch"
+		}() + " • Esc back"))
 
 	default: // inputStep 0: Selection mode
 		if len(m.savedCampaigns) > 0 {
@@ -952,9 +1053,13 @@ func (m Model) viewInput() string {
 			}
 
 			b.WriteString("\n")
-			helpText := "↑/k ↓/j nav • Enter select • n/a new • d delete • Esc quit"
+			// Show current date filter
+			if m.publishedAfter != "" {
+				b.WriteString(fmt.Sprintf("📅 Filter: posts after %s\n\n", m.publishedAfter))
+			}
+			helpText := "↑/k ↓/j nav • Enter select • n/a new • f filter • d delete • Esc quit"
 			if len(m.clipboardLinks) > 0 {
-				helpText += " • c copy • x remove • X clear"
+				helpText += "\nc copy • x remove • X clear"
 			}
 			b.WriteString(helpStyle.Render(helpText))
 		} else {
@@ -966,25 +1071,39 @@ func (m Model) viewInput() string {
 		}
 	}
 
-	mainContent := b.String()
-
 	// If we have clipboard entries, show the panel
 	if len(m.clipboardLinks) > 0 {
-		clipboardPanel := m.renderClipboardPanel(m.height-4, 2)
-		return lipgloss.JoinHorizontal(lipgloss.Top, mainContent, "  ", clipboardPanel)
+		clipboardPanel := m.renderClipboardPanel(m.height, 3)
+		return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(mainWidth).Render(b.String()), "  ", clipboardPanel)
 	}
 
-	return mainContent
+	return b.String()
 }
 
 func (m Model) viewLoading() string {
-	var b strings.Builder
+	mainWidth := m.width - clipboardPanelWidth - 3
+	if mainWidth < 40 {
+		mainWidth = 40
+	}
 
-	b.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
-	b.WriteString("\n\n")
-	b.WriteString(fmt.Sprintf("%s %s", m.spinner.View(), m.loadingMsg))
+	var main strings.Builder
 
-	return b.String()
+	main.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
+	main.WriteString("\n\n")
+	main.WriteString(fmt.Sprintf("%s %s", m.spinner.View(), m.loadingMsg))
+
+	// Render clipboard panel
+	clipboardPanel := m.renderClipboardPanel(m.height, 3)
+
+	// If we have clipboard entries, show the panel
+	if len(m.clipboardLinks) > 0 {
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.NewStyle().Width(mainWidth).Render(main.String()),
+			"  ",
+			clipboardPanel,
+		)
+	}
+	return main.String()
 }
 
 func (m Model) viewList() string {
@@ -1000,14 +1119,27 @@ func (m Model) viewList() string {
 	main.WriteString("\n")
 	// Build status with pagination info
 	pageInfo := fmt.Sprintf("Page %d", m.currentPage)
-	if m.hasMorePages {
+	// Check if next page is available (considering filter)
+	canGoNext := m.hasMorePages && m.nextCursor != ""
+	if m.publishedAfter != "" && len(m.posts) < 20 {
+		canGoNext = false
+	}
+	if canGoNext {
 		pageInfo += " →"
 	}
 	if m.currentPage > 1 {
 		pageInfo = "← " + pageInfo
 	}
 	pageInfo += fmt.Sprintf(" (%d posts)", len(m.posts))
-	main.WriteString(statusBarStyle.Render(fmt.Sprintf("Campaign: %s • %s", m.campaignID, pageInfo)))
+	if m.publishedAfter != "" {
+		pageInfo += fmt.Sprintf(" • 📅 after %s", m.publishedAfter)
+	}
+	// Build campaign display with name if available
+	campaignDisplay := m.campaignID
+	if m.campaignName != "" {
+		campaignDisplay = fmt.Sprintf("%s (%s)", m.campaignName, m.campaignID)
+	}
+	main.WriteString(statusBarStyle.Render(fmt.Sprintf("%s • %s", campaignDisplay, pageInfo)))
 	main.WriteString("\n\n")
 
 	// Header with cache column - adjust widths for narrower main panel
@@ -1100,8 +1232,8 @@ func (m Model) viewList() string {
 
 	main.WriteString(helpStyle.Render("↑/k ↓/j nav • Enter view • n/→ p/← pages • r/R refresh • c copy • q quit"))
 
-	// Render clipboard panel (4 lines padding to align with title + status + header)
-	clipboardPanel := m.renderClipboardPanel(m.height, 4)
+	// Render clipboard panel
+	clipboardPanel := m.renderClipboardPanel(m.height, 3)
 
 	// Join main and clipboard panel side by side
 	return lipgloss.JoinHorizontal(lipgloss.Top,

@@ -39,8 +39,7 @@ func NewClient(cookies string) *Client {
 
 // FetchPosts retrieves posts for a given campaign ID with pagination support
 // cursor can be empty string or "null" for the first page
-// publishedAfter filters posts to only those published after this date (RFC3339 format, e.g. "2024-01-01T00:00:00Z")
-func (c *Client) FetchPosts(campaignID string, count int, cursor string, publishedAfter string) (*models.PostsPage, error) {
+func (c *Client) FetchPosts(campaignID string, count int, cursor string) (*models.PostsPage, error) {
 	endpoint := fmt.Sprintf("%s/campaigns/%s/posts", baseURL, campaignID)
 
 	params := url.Values{}
@@ -59,11 +58,6 @@ func (c *Client) FetchPosts(campaignID string, count int, cursor string, publish
 	params.Set("page[count]", fmt.Sprintf("%d", count))
 	params.Set("filter[is_by_creator]", "true")
 	params.Set("filter[contains_exclusive_posts]", "true")
-
-	// Filter by published date if specified
-	if publishedAfter != "" {
-		params.Set("filter[published_at][gte]", publishedAfter)
-	}
 
 	// Sort by most recent first
 	params.Set("sort", "-published_at")

@@ -15,8 +15,9 @@ type Campaign struct {
 
 // Config holds the application configuration
 type Config struct {
-	Cookies   string     `json:"cookies"`
-	Campaigns []Campaign `json:"campaigns,omitempty"`
+	Cookies        string     `json:"cookies"`
+	Campaigns      []Campaign `json:"campaigns,omitempty"`
+	PublishedAfter string     `json:"published_after,omitempty"` // Filter posts to those published after this date (YYYY-MM-DD)
 }
 
 // DefaultConfigPath returns the default config file path
