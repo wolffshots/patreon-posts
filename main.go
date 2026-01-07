@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"patreon-posts/internal/cli"
 	"patreon-posts/internal/config"
 	"patreon-posts/internal/db"
 	"patreon-posts/internal/ui"
@@ -18,6 +19,7 @@ func main() {
 	configPath := flag.String("config", "", "Path to config file (default: ~/.patreon-posts.json)")
 	dbPath := flag.String("db", "", "Path to SQLite database (default: ~/.patreon-posts.db)")
 	afterFlag := flag.String("after", "", "Only show posts published after this date (YYYY-MM-DD)")
+	extractLinks := flag.Bool("extract-links", false, "Extract YouTube links from all campaigns and copy to clipboard")
 	flag.Parse()
 
 	// Determine config path
@@ -78,6 +80,15 @@ func main() {
 	if cookies == "" {
 		fmt.Println("⚠️  No cookies provided. You may not be able to view patron-only content.")
 		fmt.Printf("   Set cookies in %s or use --cookies flag.\n\n", cfgPath)
+	}
+
+	// Handle extract-links mode
+	if *extractLinks {
+		if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter); err != nil {
+			fmt.Fprintf(os.Stderr, "Error extracting links: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Create and run the TUI

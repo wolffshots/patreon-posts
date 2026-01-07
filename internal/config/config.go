@@ -15,9 +15,11 @@ type Campaign struct {
 
 // Config holds the application configuration
 type Config struct {
-	Cookies        string     `json:"cookies"`
-	Campaigns      []Campaign `json:"campaigns,omitempty"`
-	PublishedAfter string     `json:"published_after,omitempty"` // Filter posts to those published after this date (YYYY-MM-DD)
+	Cookies           string     `json:"cookies"`
+	Campaigns         []Campaign `json:"campaigns,omitempty"`
+	PublishedAfter    string     `json:"published_after,omitempty"`      // Filter posts to those published after this date (YYYY-MM-DD)
+	RequestDelayMinMs int        `json:"request_delay_min_ms,omitempty"` // Minimum delay between requests in ms (default: 1000, min: 1000)
+	RequestDelayMaxMs int        `json:"request_delay_max_ms,omitempty"` // Maximum delay between requests in ms (default: 3000)
 }
 
 // DefaultConfigPath returns the default config file path
@@ -45,6 +47,27 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// GetRequestDelayMinMs returns the minimum request delay in ms (defaults to 1000, enforces minimum of 1000)
+func (c *Config) GetRequestDelayMinMs() int {
+	if c.RequestDelayMinMs < 1000 {
+		return 1000
+	}
+	return c.RequestDelayMinMs
+}
+
+// GetRequestDelayMaxMs returns the maximum request delay in ms (defaults to 3000)
+func (c *Config) GetRequestDelayMaxMs() int {
+	if c.RequestDelayMaxMs <= 0 {
+		return 3000
+	}
+	// Ensure max is at least min
+	minMs := c.GetRequestDelayMinMs()
+	if c.RequestDelayMaxMs < minMs {
+		return minMs
+	}
+	return c.RequestDelayMaxMs
 }
 
 // Save writes configuration to file
