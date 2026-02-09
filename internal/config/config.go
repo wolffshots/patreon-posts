@@ -17,7 +17,7 @@ type Campaign struct {
 type Config struct {
 	Cookies           string     `json:"cookies"`
 	Campaigns         []Campaign `json:"campaigns,omitempty"`
-	PublishedAfter    string     `json:"published_after,omitempty"`      // Filter posts to those published after this date (YYYY-MM-DD)
+	PublishedAfter    string     `json:"published_after,omitempty"`      // Filter posts after this local date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss])
 	RequestDelayMinMs int        `json:"request_delay_min_ms,omitempty"` // Minimum delay between requests in ms (default: 1000, min: 1000)
 	RequestDelayMaxMs int        `json:"request_delay_max_ms,omitempty"` // Maximum delay between requests in ms (default: 3000)
 }

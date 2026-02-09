@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"patreon-posts/internal/api"
+	"patreon-posts/internal/datetime"
 	"patreon-posts/internal/db"
 	"patreon-posts/internal/models"
 )
@@ -221,8 +222,8 @@ func NewModel(cookies string, database *db.Database, publishedAfter string) Mode
 	ni.Width = 50
 
 	di := textinput.New()
-	di.Placeholder = "YYYY-MM-DD (optional, press Enter to skip)"
-	di.CharLimit = 10
+	di.Placeholder = "YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss] (optional)"
+	di.CharLimit = 19
 	di.Width = 40
 
 	s := spinner.New()
@@ -369,9 +370,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasMorePages = msg.HasMore
 		m.totalPosts = msg.Total
 
-		// Client-side date filtering
+		// Client-side date filtering (local time)
 		if m.publishedAfter != "" {
-			filterDate, err := time.Parse("2006-01-02", m.publishedAfter)
+			filterDate, err := datetime.ParseLocal(m.publishedAfter)
 			if err == nil {
 				var filtered []models.Post
 				for _, post := range m.posts {
@@ -380,6 +381,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.posts = filtered
+			} else {
+				m.statusMessage = "✗ Invalid date/time filter; showing all posts"
 			}
 		}
 
@@ -708,7 +711,15 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case 3: // Entering date filter
 		switch msg.String() {
 		case "enter":
-			m.publishedAfter = m.dateInput.Value()
+			input := strings.TrimSpace(m.dateInput.Value())
+			if input != "" {
+				if _, err := datetime.ParseLocal(input); err != nil {
+					m.statusMessage = fmt.Sprintf("✗ Invalid date/time: %v", err)
+					m.dateInput.Focus()
+					return m, nil
+				}
+			}
+			m.publishedAfter = input
 			m.dateInput.Blur()
 
 			if m.editingDateOnly {
@@ -1027,7 +1038,7 @@ func (m Model) viewInput() string {
 		}
 		b.WriteString(inputStyle.Render(m.dateInput.View()))
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("Format: YYYY-MM-DD • Enter to " + func() string {
+		b.WriteString(helpStyle.Render("Format: YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss] • Enter to " + func() string {
 			if m.editingDateOnly {
 				return "save"
 			}

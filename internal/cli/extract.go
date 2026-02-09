@@ -9,6 +9,7 @@ import (
 
 	"patreon-posts/internal/api"
 	"patreon-posts/internal/config"
+	"patreon-posts/internal/datetime"
 	"patreon-posts/internal/db"
 )
 
@@ -22,12 +23,12 @@ func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate st
 	// Parse date filter
 	var filterDate time.Time
 	if afterDate != "" {
-		parsed, err := time.Parse("2006-01-02", afterDate)
+		parsed, err := datetime.ParseLocal(afterDate)
 		if err != nil {
-			return fmt.Errorf("invalid date format '%s', expected YYYY-MM-DD: %w", afterDate, err)
+			return fmt.Errorf("invalid date/time '%s': %w", afterDate, err)
 		}
 		filterDate = parsed
-		fmt.Printf("📅 Filtering posts after: %s\n", filterDate.Format("2006-01-02"))
+		fmt.Printf("📅 Filtering posts after: %s\n", datetime.FormatLocal(filterDate))
 	}
 
 	client := api.NewClient(cfg.Cookies)
