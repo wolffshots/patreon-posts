@@ -22,8 +22,9 @@ func main() {
 	configPath := flag.String("config", "", "Path to config file (default: ~/.patreon-posts.json)")
 	dbPath := flag.String("db", "", "Path to SQLite database (default: ~/.patreon-posts.db)")
 	afterFlag := flag.String("after", "", "Only show posts published after this date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss]) or 'last'")
-	extractLinks := flag.Bool("extract-links", false, "Extract YouTube links from all campaigns and copy to clipboard")
-	flag.Parse()
+    extractLinks := flag.Bool("extract-links", false, "Extract YouTube links from all campaigns and copy to clipboard")
+    forceRefresh := flag.Bool("force-refresh", false, "Force refresh post details when running --extract-links")
+    flag.Parse()
 
 	runFlags := collectRunFlags()
 
@@ -88,36 +89,53 @@ func main() {
 		publishedAfter = strings.TrimSpace(cfg.PublishedAfter)
 	}
 
-	if strings.EqualFold(publishedAfter, "last") {
-		lastRun, err := database.GetLastRun()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading last run info: %v\n", err)
-			os.Exit(1)
-		}
-		if lastRun == nil {
-			fmt.Fprintln(os.Stderr, "Error: no previous run found. Run once without --after last to initialize.")
-			os.Exit(1)
-		}
-		publishedAfter = datetime.FormatLocal(lastRun.RunAt)
-		fmt.Printf("📅 Using last run time: %s\n", publishedAfter)
-	} else if publishedAfter != "" {
-		if _, err := datetime.ParseLocal(publishedAfter); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: invalid --after value: %v\n", err)
-			os.Exit(1)
-		}
-	}
+    if strings.EqualFold(publishedAfter, "last") {
+        // If extract-links mode is requested, prefer the most recent run that
+        // included the --extract-links flag. Otherwise fall back to the
+        // generic last run timestamp.
+        var lastRun *db.LastRunInfo
+        var err error
+        if *extractLinks {
+            lastRun, err = database.GetLastRunByFlag("--extract-links")
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "Error reading last extract-links run info: %v\n", err)
+                os.Exit(1)
+            }
+            if lastRun == nil {
+                fmt.Fprintln(os.Stderr, "Error: no previous run found that used --extract-links. Run once with --extract-links to initialize.")
+                os.Exit(1)
+            }
+        } else {
+            lastRun, err = database.GetLastRun()
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "Error reading last run info: %v\n", err)
+                os.Exit(1)
+            }
+            if lastRun == nil {
+                fmt.Fprintln(os.Stderr, "Error: no previous run found. Run once without --after last to initialize.")
+                os.Exit(1)
+            }
+        }
+        publishedAfter = datetime.FormatLocal(lastRun.RunAt)
+        fmt.Printf("📅 Using last run time: %s\n", publishedAfter)
+    } else if publishedAfter != "" {
+        if _, err := datetime.ParseLocal(publishedAfter); err != nil {
+            fmt.Fprintf(os.Stderr, "Error: invalid --after value: %v\n", err)
+            os.Exit(1)
+        }
+    }
 
-	// Handle extract-links mode
-	if *extractLinks {
-		if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter); err != nil {
-			fmt.Fprintf(os.Stderr, "Error extracting links: %v\n", err)
-			os.Exit(1)
-		}
-		if err := database.SaveLastRun(time.Now(), runFlags); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to save last run info: %v\n", err)
-		}
-		return
-	}
+    // Handle extract-links mode
+    if *extractLinks {
+        if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter, *forceRefresh); err != nil {
+            fmt.Fprintf(os.Stderr, "Error extracting links: %v\n", err)
+            os.Exit(1)
+        }
+        if err := database.SaveLastRun(time.Now(), runFlags); err != nil {
+            fmt.Fprintf(os.Stderr, "Warning: failed to save last run info: %v\n", err)
+        }
+        return
+    }
 
 	// Create and run the TUI
 	model := ui.NewModel(cookies, database, publishedAfter)

@@ -1,35 +1,50 @@
 package cli
 
 import (
-	"encoding/json"
-	"fmt"
-	"math/rand"
-	"strings"
-	"time"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "math/rand"
+    "strings"
+    "time"
 
-	"patreon-posts/internal/api"
-	"patreon-posts/internal/config"
-	"patreon-posts/internal/datetime"
-	"patreon-posts/internal/db"
+    "patreon-posts/internal/api"
+    "patreon-posts/internal/config"
+    "patreon-posts/internal/datetime"
+    "patreon-posts/internal/db"
 )
 
 // ExtractYouTubeLinks goes through all campaigns, fetches posts after the given date,
-// extracts YouTube links, copies them to clipboard, and prints them to terminal
-func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate string) error {
-	if len(cfg.Campaigns) == 0 {
-		return fmt.Errorf("no campaigns configured in config file")
-	}
+// extracts YouTube links, copies them to clipboard, and prints them to terminal.
+// If forceRefresh is true, post details will be re-fetched even if cached.
+func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate string, forceRefresh bool) error {
+    if len(cfg.Campaigns) == 0 {
+        return fmt.Errorf("no campaigns configured in config file")
+    }
 
-	// Parse date filter
-	var filterDate time.Time
-	if afterDate != "" {
-		parsed, err := datetime.ParseLocal(afterDate)
-		if err != nil {
-			return fmt.Errorf("invalid date/time '%s': %w", afterDate, err)
-		}
-		filterDate = parsed
-		fmt.Printf("📅 Filtering posts after: %s\n", datetime.FormatLocal(filterDate))
-	}
+    // Parse date filter. Support special value "last" to mean the last time
+    // extract-links was run (from the DB history).
+    var filterDate time.Time
+    afterTrim := strings.TrimSpace(afterDate)
+    if strings.EqualFold(afterTrim, "last") {
+        // Prefer runs that included --extract-links flag
+        lastRun, err := database.GetLastRunByFlag("--extract-links")
+        if err != nil {
+            return fmt.Errorf("error reading last extract-links run info: %w", err)
+        }
+        if lastRun == nil {
+            return fmt.Errorf("no previous run found that used --extract-links; run once with --extract-links to initialize")
+        }
+        filterDate = lastRun.RunAt
+        fmt.Printf("📅 Filtering posts after last extract-links run: %s\n", datetime.FormatLocal(filterDate))
+    } else if afterTrim != "" {
+        parsed, err := datetime.ParseLocal(afterTrim)
+        if err != nil {
+            return fmt.Errorf("invalid date/time '%s': %w", afterDate, err)
+        }
+        filterDate = parsed
+        fmt.Printf("📅 Filtering posts after: %s\n", datetime.FormatLocal(filterDate))
+    }
 
 	client := api.NewClient(cfg.Cookies)
 	minDelayMs := cfg.GetRequestDelayMinMs()
@@ -48,11 +63,11 @@ func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate st
 		}
 		fmt.Printf("🎯 Campaign: %s\n", campaignName)
 
-		links, err := extractLinksFromCampaign(client, database, campaign.ID, filterDate, minDelayMs, maxDelayMs)
-		if err != nil {
-			fmt.Printf("   ⚠️  Error: %v\n", err)
-			continue
-		}
+        links, err := extractLinksFromCampaign(client, database, campaign.ID, filterDate, minDelayMs, maxDelayMs, forceRefresh)
+        if err != nil {
+            fmt.Printf("   ⚠️  Error: %v\n", err)
+            continue
+        }
 
 		// Deduplicate links
 		for _, link := range links {
@@ -86,11 +101,12 @@ func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate st
 
 // extractLinksFromCampaign fetches all posts for a campaign and extracts YouTube links
 func extractLinksFromCampaign(
-	client *api.Client,
-	database *db.Database,
-	campaignID string,
-	filterDate time.Time,
-	minDelayMs, maxDelayMs int,
+    client *api.Client,
+    database *db.Database,
+    campaignID string,
+    filterDate time.Time,
+    minDelayMs, maxDelayMs int,
+    forceRefresh bool,
 ) ([]string, error) {
 	var allLinks []string
 	cursor := ""
@@ -120,32 +136,38 @@ func extractLinksFromCampaign(
 
 			postsProcessed++
 
-			// Check if we have cached details
-			cached, err := database.GetPost(post.ID)
-			if err == nil && cached != nil && cached.DetailsCached {
-				// Use cached YouTube links
-				if cached.YouTubeLinks != "" {
-					var links []string
-					if err := json.Unmarshal([]byte(cached.YouTubeLinks), &links); err == nil {
-						allLinks = append(allLinks, links...)
-					}
-				}
-				continue
-			}
+            // Check if we have cached details and we are not forcing a refresh
+            if !forceRefresh {
+                cached, err := database.GetPost(post.ID)
+                if err == nil && cached != nil && cached.DetailsCached {
+                    // Use cached YouTube links
+                    if cached.YouTubeLinks != "" {
+                        var links []string
+                        if err := json.Unmarshal([]byte(cached.YouTubeLinks), &links); err == nil {
+                            allLinks = append(allLinks, links...)
+                        }
+                    }
+                    continue
+                }
+            }
 
-			// Fetch post details
-			details, err := client.FetchPostDetails(post.ID)
-			if err != nil {
-				fmt.Printf("   ⚠️  Failed to fetch post %s: %v\n", post.ID, err)
-				randomDelay(minDelayMs, maxDelayMs)
-				continue
-			}
+            // Fetch post details from API
+            details, err := client.FetchPostDetails(post.ID)
+            if err != nil {
+                // If authentication issue, return early so caller can handle it
+                if errors.Is(err, api.ErrAuthRequired) {
+                    return allLinks, fmt.Errorf("authentication error while fetching post %s: %w", post.ID, err)
+                }
+                fmt.Printf("   ⚠️  Failed to fetch post %s: %v\n", post.ID, err)
+                randomDelay(minDelayMs, maxDelayMs)
+                continue
+            }
 
-			// Cache the details
-			linksJSON, _ := json.Marshal(details.YouTubeLinks)
-			database.SavePostDetails(post.ID, details.Description, string(linksJSON))
+            // Cache (or overwrite) the details
+            linksJSON, _ := json.Marshal(details.YouTubeLinks)
+            database.SavePostDetails(post.ID, details.Description, string(linksJSON))
 
-			allLinks = append(allLinks, details.YouTubeLinks...)
+            allLinks = append(allLinks, details.YouTubeLinks...)
 
 			// Random delay after each post detail fetch
 			randomDelay(minDelayMs, maxDelayMs)

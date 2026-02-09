@@ -1,15 +1,16 @@
 package api
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"regexp"
-	"strings"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "net/http"
+    "net/url"
+    "regexp"
+    "strings"
 
-	"patreon-posts/internal/models"
+    "patreon-posts/internal/models"
 )
 
 // YouTube URL patterns
@@ -25,16 +26,66 @@ const baseURL = "https://www.patreon.com/api"
 
 // Client handles Patreon API requests
 type Client struct {
-	httpClient *http.Client
-	cookies    string
+    httpClient *http.Client
+    cookies    string
 }
 
 // NewClient creates a new Patreon API client
 func NewClient(cookies string) *Client {
-	return &Client{
-		httpClient: &http.Client{},
-		cookies:    cookies,
-	}
+    return &Client{
+        httpClient: &http.Client{},
+        cookies:    cookies,
+    }
+}
+
+// ErrAuthRequired is returned when the API indicates authentication is required
+// (e.g., cookies missing, expired, or otherwise invalid).
+var ErrAuthRequired = errors.New("authentication required; cookies may be invalid or expired")
+
+// isAuthError inspects the response status and body to heuristically determine
+// whether the failure was due to authentication (expired/invalid cookies).
+func isAuthError(resp *http.Response, body []byte) bool {
+    if resp == nil {
+        return false
+    }
+    // Common auth-related status codes
+    if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+        return true
+    }
+
+    // Redirects to a login page are indicative of missing/invalid session
+    if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+        loc := strings.ToLower(resp.Header.Get("Location"))
+        if strings.Contains(loc, "login") || strings.Contains(loc, "signin") {
+            return true
+        }
+    }
+
+    // Heuristic checks in the body for phrases indicating auth required
+    s := strings.ToLower(string(body))
+    keywords := []string{
+        "please sign in",
+        "please sign in to",
+        "sign in",
+        "sign-in",
+        "sign in to",
+        "please login",
+        "log in",
+        "login",
+        "not authenticated",
+        "authentication",
+        "session",
+        "cookie",
+        "csrf",
+        "you must be logged in",
+    }
+    for _, k := range keywords {
+        if strings.Contains(s, k) {
+            return true
+        }
+    }
+
+    return false
 }
 
 // FetchPosts retrieves posts for a given campaign ID with pagination support
@@ -72,21 +123,23 @@ func (c *Client) FetchPosts(campaignID string, count int, cursor string) (*model
 
 	c.setHeaders(req)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
+    resp, err := c.httpClient.Do(req)
+    if err != nil {
+        return nil, fmt.Errorf("failed to execute request: %w", err)
+    }
+    defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-	}
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read response: %w", err)
+    }
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
+    if resp.StatusCode != http.StatusOK {
+        if isAuthError(resp, body) {
+            return nil, ErrAuthRequired
+        }
+        return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+    }
 
 	var patreonResp models.PatreonResponse
 	if err := json.Unmarshal(body, &patreonResp); err != nil {
@@ -145,21 +198,23 @@ func (c *Client) FetchPostDetails(postID string) (*models.PostDetails, error) {
 
 	c.setHeaders(req)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
+    resp, err := c.httpClient.Do(req)
+    if err != nil {
+        return nil, fmt.Errorf("failed to execute request: %w", err)
+    }
+    defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-	}
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read response: %w", err)
+    }
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
+    if resp.StatusCode != http.StatusOK {
+        if isAuthError(resp, body) {
+            return nil, ErrAuthRequired
+        }
+        return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+    }
 
 	var detailResp models.PostDetailResponse
 	if err := json.Unmarshal(body, &detailResp); err != nil {
