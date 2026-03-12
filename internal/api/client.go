@@ -20,6 +20,73 @@ var youtubePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`https?://youtu\.be/([a-zA-Z0-9_-]{11})`),
 	regexp.MustCompile(`https?://(?:www\.)?youtube\.com/v/([a-zA-Z0-9_-]{11})`),
 	regexp.MustCompile(`https?://(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})`),
+	regexp.MustCompile(`https?://(?:www\.)?youtube\.com/live/([a-zA-Z0-9_-]{11})`),
+}
+
+// pmNode represents a node in a ProseMirror JSON document
+type pmNode struct {
+	Type    string   `json:"type"`
+	Text    string   `json:"text"`
+	Content []pmNode `json:"content"`
+	Marks   []pmMark `json:"marks"`
+}
+
+// pmMark represents a mark (e.g. link, bold) applied to a text node
+type pmMark struct {
+	Type  string  `json:"type"`
+	Attrs pmAttrs `json:"attrs"`
+}
+
+// pmAttrs holds the attributes for ProseMirror marks and nodes
+type pmAttrs struct {
+	Href string `json:"href"`
+}
+
+// parseContentJSON walks a ProseMirror JSON document string and returns
+// human-readable plain text and all href values found in link marks.
+func parseContentJSON(jsonStr string) (text string, links []string) {
+	if jsonStr == "" {
+		return "", nil
+	}
+	var doc pmNode
+	if err := json.Unmarshal([]byte(jsonStr), &doc); err != nil {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	var hrefs []string
+
+	var walk func(node pmNode)
+	walk = func(node pmNode) {
+		switch node.Type {
+		case "text":
+			sb.WriteString(node.Text)
+			for _, mark := range node.Marks {
+				if mark.Type == "link" && mark.Attrs.Href != "" {
+					hrefs = append(hrefs, mark.Attrs.Href)
+				}
+			}
+		case "hardBreak":
+			sb.WriteString("\n")
+		case "paragraph", "heading":
+			for _, child := range node.Content {
+				walk(child)
+			}
+			sb.WriteString("\n")
+		case "listItem":
+			sb.WriteString("• ")
+			for _, child := range node.Content {
+				walk(child)
+			}
+		default:
+			for _, child := range node.Content {
+				walk(child)
+			}
+		}
+	}
+
+	walk(doc)
+	return strings.TrimSpace(sb.String()), hrefs
 }
 
 const baseURL = "https://www.patreon.com/api"
@@ -186,7 +253,7 @@ func (c *Client) FetchPostDetails(postID string) (*models.PostDetails, error) {
 	endpoint := fmt.Sprintf("%s/posts/%s", baseURL, postID)
 
 	params := url.Values{}
-	params.Set("fields[post]", "content,embed,title,post_type,published_at,patreon_url")
+	params.Set("fields[post]", "content,content_json_string,embed,title,post_type,published_at,patreon_url")
 	params.Set("json-api-version", "1.0")
 
 	fullURL := fmt.Sprintf("%s?%s", endpoint, params.Encode())
@@ -221,23 +288,71 @@ func (c *Client) FetchPostDetails(postID string) (*models.PostDetails, error) {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	// Determine content: prefer HTML content field, fall back to ProseMirror JSON
+	content := detailResp.Data.Attributes.Content
+	var parsedLinks []string
+	isHTML := content != ""
+	if content == "" && detailResp.Data.Attributes.ContentJSONString != "" {
+		content, parsedLinks = parseContentJSON(detailResp.Data.Attributes.ContentJSONString)
+	}
+
+	embed := detailResp.Data.Attributes.Embed
+
 	details := &models.PostDetails{
 		ID:          detailResp.Data.ID,
 		Title:       detailResp.Data.Attributes.Title,
-		Content:     detailResp.Data.Attributes.Content,
+		Content:     content,
 		PostType:    detailResp.Data.Attributes.PostType,
 		PublishedAt: detailResp.Data.Attributes.PublishedAt,
 	}
 
-	// Extract YouTube links from content and embed
-	allContent := details.Content
-	if detailResp.Data.Attributes.Embed.URL != "" {
-		allContent += " " + detailResp.Data.Attributes.Embed.URL
+	// Search all available content sources for YouTube links
+	linkSources := []string{content}
+	linkSources = append(linkSources, parsedLinks...)
+	if embed.URL != "" {
+		linkSources = append(linkSources, embed.URL)
 	}
-	details.YouTubeLinks = ExtractYouTubeLinks(allContent)
+	if embed.HTML != "" {
+		linkSources = append(linkSources, embed.HTML)
+	}
+	details.YouTubeLinks = ExtractYouTubeLinks(strings.Join(linkSources, " "))
 
-	// Strip HTML for description
-	details.Description = stripHTML(details.Content)
+	// Build human-readable description
+	var descParts []string
+	var textContent string
+	if isHTML {
+		textContent = stripHTML(content)
+	} else {
+		textContent = content
+	}
+	// Fall back to embed description if we have no text content
+	if textContent == "" && embed.Description != "" {
+		textContent = embed.Description
+	}
+	if textContent != "" {
+		descParts = append(descParts, textContent)
+	}
+	// Append embed metadata when present
+	if embed.Subject != "" || embed.URL != "" {
+		var embedInfo strings.Builder
+		if embed.Provider != "" {
+			embedInfo.WriteString("[" + embed.Provider + "]")
+		}
+		if embed.Subject != "" {
+			if embedInfo.Len() > 0 {
+				embedInfo.WriteString(" ")
+			}
+			embedInfo.WriteString(`"` + embed.Subject + `"`)
+		}
+		if embed.URL != "" {
+			if embedInfo.Len() > 0 {
+				embedInfo.WriteString("\n")
+			}
+			embedInfo.WriteString(embed.URL)
+		}
+		descParts = append(descParts, embedInfo.String())
+	}
+	details.Description = strings.Join(descParts, "\n\n")
 
 	return details, nil
 }

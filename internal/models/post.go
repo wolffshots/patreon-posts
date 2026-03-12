@@ -89,6 +89,7 @@ type PostDetailData struct {
 type PostDetailAttributes struct {
 	Title       string    `json:"title"`
 	Content     string    `json:"content"`
+	ContentJSONString     string    `json:"content_json_string"`
 	PostType    string    `json:"post_type"`
 	PublishedAt time.Time `json:"published_at"`
 	Embed       Embed     `json:"embed"`
@@ -98,7 +99,9 @@ type PostDetailAttributes struct {
 type Embed struct {
 	URL         string `json:"url"`
 	Provider    string `json:"provider"`
+	Subject     string `json:"subject"`
 	Description string `json:"description"`
+	HTML        string `json:"html"`
 }
 
 // PostDetails contains the extracted details from a post

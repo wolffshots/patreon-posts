@@ -1286,7 +1286,12 @@ func (m Model) renderDetailsContent() string {
 	var b strings.Builder
 
 	b.WriteString(headerStyle.Render(m.postDetails.Title))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if m.postDetails.PostType != "" {
+		b.WriteString(typeStyle.Render("  " + m.postDetails.PostType))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	// YouTube Links section
 	if len(m.postDetails.YouTubeLinks) > 0 {
@@ -1321,11 +1326,10 @@ func (m Model) renderDetailsContent() string {
 		b.WriteString("\n\n")
 	}
 
-	// Description section
+	// Description section — always shown; includes embed metadata when present
 	b.WriteString(headerStyle.Render("📝 Description"))
 	b.WriteString("\n")
 	if m.postDetails.Description != "" {
-		// Word wrap the description
 		wrapped := wordWrap(m.postDetails.Description, m.viewport.Width-4)
 		b.WriteString(descriptionStyle.Render(wrapped))
 	} else {
@@ -1348,30 +1352,35 @@ func (m Model) viewError() string {
 	return b.String()
 }
 
-// wordWrap wraps text to the specified width
+// wordWrap wraps text to the specified width, preserving newlines as paragraph breaks.
 func wordWrap(text string, width int) string {
 	if width <= 0 {
 		width = 80
 	}
 	var result strings.Builder
-	words := strings.Fields(text)
-	lineLen := 0
-
-	for i, word := range words {
-		if lineLen+len(word)+1 > width && lineLen > 0 {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if i > 0 {
 			result.WriteString("\n")
-			lineLen = 0
 		}
-		if lineLen > 0 {
-			result.WriteString(" ")
-			lineLen++
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
-		result.WriteString(word)
-		lineLen += len(word)
-		if i < len(words)-1 && lineLen > 0 {
-			// Continue
+		words := strings.Fields(line)
+		lineLen := 0
+		for _, word := range words {
+			if lineLen+len(word)+1 > width && lineLen > 0 {
+				result.WriteString("\n")
+				lineLen = 0
+			}
+			if lineLen > 0 {
+				result.WriteString(" ")
+				lineLen++
+			}
+			result.WriteString(word)
+			lineLen += len(word)
 		}
 	}
-
 	return result.String()
 }
