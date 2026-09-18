@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"patreon-posts/internal/cookies"
 )
 
 // Campaign represents a saved campaign
@@ -15,11 +17,15 @@ type Campaign struct {
 
 // Config holds the application configuration
 type Config struct {
-	Cookies           string     `json:"cookies"`
-	Campaigns         []Campaign `json:"campaigns,omitempty"`
-	PublishedAfter    string     `json:"published_after,omitempty"`      // Filter posts after this local date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss])
-	RequestDelayMinMs int        `json:"request_delay_min_ms,omitempty"` // Minimum delay between requests in ms (default: 1000, min: 1000)
-	RequestDelayMaxMs int        `json:"request_delay_max_ms,omitempty"` // Maximum delay between requests in ms (default: 3000)
+	Cookies string `json:"cookies"`
+	// CookieSource, when set, refreshes Cookies from a browser profile on each
+	// run. Cookies then acts as the last known good value for when the browser
+	// is unavailable.
+	CookieSource      *cookies.Source `json:"cookie_source,omitempty"`
+	Campaigns         []Campaign      `json:"campaigns,omitempty"`
+	PublishedAfter    string          `json:"published_after,omitempty"`      // Filter posts after this local date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss])
+	RequestDelayMinMs int             `json:"request_delay_min_ms,omitempty"` // Minimum delay between requests in ms (default: 1000, min: 1000)
+	RequestDelayMaxMs int             `json:"request_delay_max_ms,omitempty"` // Maximum delay between requests in ms (default: 3000)
 }
 
 // DefaultConfigPath returns the default config file path
@@ -72,7 +78,7 @@ func (c *Config) GetRequestDelayMaxMs() int {
 
 // Save writes configuration to file
 func Save(path string, cfg *Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.MarshalIndent(cfg, "", "    ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}

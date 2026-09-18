@@ -2,9 +2,11 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -137,6 +139,15 @@ const (
 	stateList
 	stateDetails
 	stateError
+	stateRateLimited
+)
+
+// Rate limit policy for the TUI. It retries fewer times than the CLI because
+// somebody is sitting there watching it wait.
+const (
+	uiRateLimitMaxAttempts = 3
+	uiRateLimitMaxWait     = 5 * time.Minute
+	uiRateLimitBaseWait    = 60 * time.Second
 )
 
 const clipboardPanelWidth = 45
@@ -178,6 +189,13 @@ type Model struct {
 	pendingID       string          // ID entered in step 1, waiting for name
 	publishedAfter  string          // Date filter (YYYY-MM-DD format)
 	editingDateOnly bool            // True when editing date from selection screen
+	// Rate limiting. pending* records what to re-issue once the wait is over.
+	rateLimitUntil   time.Time
+	rateLimitAttempt int
+	rateLimitStatus  int
+	pendingKind      string // "posts" or "details"
+	pendingCursor    string
+	pendingPostID    string
 }
 
 // PostsFetchedMsg is sent when posts are fetched
@@ -188,12 +206,14 @@ type PostsFetchedMsg struct {
 	Total      int
 	Err        error
 	FromCache  bool
+	Cursor     string // cursor this fetch used, so a retry can repeat it
 }
 
 // PostDetailsFetchedMsg is sent when post details are fetched
 type PostDetailsFetchedMsg struct {
 	Details *models.PostDetails
 	Err     error
+	PostID  string // so a retry knows what to re-request
 }
 
 // CacheUpdatedMsg is sent when cache status is updated
@@ -201,6 +221,9 @@ type CacheUpdatedMsg struct {
 	PostID string
 	Cached bool
 }
+
+// rateLimitTickMsg drives the countdown while waiting out a rate limit.
+type rateLimitTickMsg time.Time
 
 // CampaignsLoadedMsg is sent when saved campaigns are loaded
 type CampaignsLoadedMsg struct {
@@ -345,6 +368,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stateError:
 			return m.handleErrorKeys(msg)
+
+		case stateRateLimited:
+			return m.handleRateLimitKeys(msg)
 		}
 
 	case tea.WindowSizeMsg:
@@ -360,10 +386,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PostsFetchedMsg:
 		if msg.Err != nil {
+			if rl := asRateLimit(msg.Err); rl != nil {
+				return m.enterRateLimit(rl, "posts", msg.Cursor, "")
+			}
 			m.state = stateError
 			m.err = msg.Err
 			return m, nil
 		}
+		m.rateLimitAttempt = 0
 		m.posts = msg.Posts
 		m.nextCursor = msg.NextCursor
 		m.hasMorePages = msg.HasMore
@@ -405,10 +435,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PostDetailsFetchedMsg:
 		if msg.Err != nil {
+			if rl := asRateLimit(msg.Err); rl != nil {
+				return m.enterRateLimit(rl, "details", "", msg.PostID)
+			}
 			m.state = stateError
 			m.err = msg.Err
 			return m, nil
 		}
+		m.rateLimitAttempt = 0
 		m.postDetails = msg.Details
 		m.linkCursor = 0
 		// Save to cache
@@ -438,6 +472,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inputStep = 0
 		}
 		return m, nil
+
+	case rateLimitTickMsg:
+		if m.state != stateRateLimited {
+			return m, nil // cancelled while waiting
+		}
+		if time.Now().Before(m.rateLimitUntil) {
+			return m, rateLimitTick()
+		}
+		return m.resumePending()
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -654,6 +697,98 @@ func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// asRateLimit returns the rate limit error inside err, or nil.
+func asRateLimit(err error) *api.RateLimitError {
+	var rl *api.RateLimitError
+	if errors.As(err, &rl) {
+		return rl
+	}
+	return nil
+}
+
+func rateLimitTick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return rateLimitTickMsg(t) })
+}
+
+// enterRateLimit parks the UI on a countdown instead of failing outright. It
+// honours Retry-After when Patreon sends one and backs off linearly when it does
+// not, but gives up when the wait or the attempt count gets unreasonable.
+func (m Model) enterRateLimit(rl *api.RateLimitError, kind, cursor, postID string) (tea.Model, tea.Cmd) {
+	m.rateLimitAttempt++
+
+	wait := rl.RetryAfter
+	if wait <= 0 {
+		wait = time.Duration(m.rateLimitAttempt) * uiRateLimitBaseWait
+	}
+
+	if m.rateLimitAttempt > uiRateLimitMaxAttempts {
+		m.state = stateError
+		m.err = fmt.Errorf("still rate limited by Patreon (HTTP %d) after %d attempts; try again later",
+			rl.StatusCode, uiRateLimitMaxAttempts)
+		m.rateLimitAttempt = 0
+		return m, nil
+	}
+	if wait > uiRateLimitMaxWait {
+		m.state = stateError
+		m.err = fmt.Errorf("Patreon asked to wait %s (HTTP %d), longer than the %s limit; try again later",
+			wait.Round(time.Second), rl.StatusCode, uiRateLimitMaxWait)
+		m.rateLimitAttempt = 0
+		return m, nil
+	}
+
+	m.rateLimitStatus = rl.StatusCode
+	m.rateLimitUntil = time.Now().Add(wait)
+	m.pendingKind = kind
+	m.pendingCursor = cursor
+	m.pendingPostID = postID
+	m.state = stateRateLimited
+	return m, rateLimitTick()
+}
+
+// resumePending re-issues the request that was rate limited.
+func (m Model) resumePending() (tea.Model, tea.Cmd) {
+	m.state = stateLoading
+	m.loadingMsg = "Retrying after rate limit..."
+	if m.pendingKind == "details" {
+		return m, tea.Batch(m.spinner.Tick, m.fetchPostDetails(m.pendingPostID))
+	}
+	// Bypass the cache: the cache is what failed to satisfy this request.
+	return m, tea.Batch(m.spinner.Tick, m.fetchPosts(m.pendingCursor, true))
+}
+
+func (m Model) handleRateLimitKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "r":
+		return m.resumePending()
+	case "c", "esc":
+		m.state = stateError
+		m.err = fmt.Errorf("rate limited by Patreon (HTTP %d); wait cancelled", m.rateLimitStatus)
+		m.rateLimitAttempt = 0
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) viewRateLimited() string {
+	remaining := time.Until(m.rateLimitUntil)
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
+	b.WriteString("\n\n")
+	b.WriteString(errorStyle.Render(fmt.Sprintf("⏳ Rate limited by Patreon (HTTP %d)", m.rateLimitStatus)))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("Retrying in %02d:%02d  (attempt %d of %d)",
+		int(remaining.Seconds())/60, int(remaining.Seconds())%60,
+		m.rateLimitAttempt, uiRateLimitMaxAttempts))
+	b.WriteString("\n\n")
+	b.WriteString(helpStyle.Render("r retry now • c cancel • q quit"))
+
+	return b.String()
+}
+
 func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.inputStep {
 	case 1: // Entering campaign ID
@@ -853,6 +988,7 @@ func (m Model) fetchPosts(cursor string, forceRefresh bool) tea.Cmd {
 						HasMore:    cachedPage.HasMore,
 						Total:      0,
 						FromCache:  true,
+						Cursor:     cursor,
 					}
 				}
 			}
@@ -861,7 +997,7 @@ func (m Model) fetchPosts(cursor string, forceRefresh bool) tea.Cmd {
 		// Fetch from API
 		page, err := m.client.FetchPosts(m.campaignID, 20, cursor)
 		if err != nil {
-			return PostsFetchedMsg{Err: err}
+			return PostsFetchedMsg{Err: err, Cursor: cursor}
 		}
 
 		// Save campaign and posts to cache
@@ -894,6 +1030,7 @@ func (m Model) fetchPosts(cursor string, forceRefresh bool) tea.Cmd {
 			HasMore:    page.HasMore,
 			Total:      page.Total,
 			FromCache:  false,
+			Cursor:     cursor,
 		}
 	}
 }
@@ -901,7 +1038,7 @@ func (m Model) fetchPosts(cursor string, forceRefresh bool) tea.Cmd {
 func (m Model) fetchPostDetails(postID string) tea.Cmd {
 	return func() tea.Msg {
 		details, err := m.client.FetchPostDetails(postID)
-		return PostDetailsFetchedMsg{Details: details, Err: err}
+		return PostDetailsFetchedMsg{Details: details, Err: err, PostID: postID}
 	}
 }
 
@@ -991,6 +1128,8 @@ func (m Model) View() string {
 		return m.viewDetails()
 	case stateError:
 		return m.viewError()
+	case stateRateLimited:
+		return m.viewRateLimited()
 	}
 	return ""
 }

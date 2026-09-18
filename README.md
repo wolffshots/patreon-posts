@@ -102,11 +102,53 @@ Create a config file at `~/.patreon-posts.json`:
 | Field | Description |
 |-------|-------------|
 | `cookies` | Patreon session cookies (see below) |
+| `cookie_source` | Optional. Reads cookies from a browser profile on every run (see below) |
 | `campaigns` | Optional list of campaign seeds. These are saved into the database and appear in the TUI selection list on first launch |
 | `request_delay_min_ms` | Minimum random delay (ms) between API requests in `--extract-links` mode (default 500) |
 | `request_delay_max_ms` | Maximum random delay (ms) between API requests in `--extract-links` mode (default 1500) |
 
 Campaigns added through the TUI are persisted in the SQLite database and do not need to be listed in the config file.
+
+### Automatic Cookie Refresh
+
+Patreon sessions expire. Rather than copying the `Cookie` header by hand each
+time, set `cookie_source` and the app reads the session from a browser profile
+on every run:
+
+```json
+{
+  "cookie_source": { "type": "zen", "profile": "253eeevz.Default (release)-1" }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | `firefox`, `zen`, `librewolf`, `waterfox`, or `env` |
+| `profile` | Optional. Profile directory name. When omitted, the profile with the most recently used Patreon session wins |
+| `path` | Optional. Points straight at a `cookies.sqlite` file or a profile directory, bypassing the built-in profile roots |
+
+Stay signed in to Patreon in that browser and the session refreshes itself. The
+value is written back to `cookies` after each run, so the app still works when
+the browser profile is unreachable.
+
+Only Firefox-family browsers are supported, because they store cookie values as
+plain text. Chromium browsers encrypt them, and Chrome's App-Bound Encryption
+puts them out of reach of an external reader.
+
+For a container, set `"type": "env"` and pass the header in the `PATREON_COOKIES`
+environment variable instead.
+
+### Rate Limits
+
+When Patreon returns HTTP 429 or 503, the app waits and retries rather than
+failing. It honours the `Retry-After` header when one is sent and backs off
+linearly when it is not. The CLI prints a countdown; the TUI shows a countdown
+screen with `r` to retry now and `c` to cancel.
+
+It gives up instead of waiting when the server asks for longer than 15 minutes
+(5 minutes in the TUI), or after 5 attempts (3 in the TUI). In `--extract-links`
+mode a rate limit stops the whole run, because the remaining campaigns would hit
+the same limit.
 
 ### Data Storage
 
@@ -114,6 +156,8 @@ Campaigns added through the TUI are persisted in the SQLite database and do not 
 - **Database**: `~/.patreon-posts.db` — SQLite cache for posts, pages, details, saved campaigns, and run history
 
 ### Getting Your Cookies
+
+Prefer `cookie_source` above, which does this for you. To copy them by hand:
 
 1. Open your browser's Developer Tools (F12)
 2. Go to the Network tab

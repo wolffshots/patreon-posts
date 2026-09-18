@@ -11,6 +11,7 @@ import (
 
 	"patreon-posts/internal/cli"
 	"patreon-posts/internal/config"
+	"patreon-posts/internal/cookies"
 	"patreon-posts/internal/datetime"
 	"patreon-posts/internal/db"
 	"patreon-posts/internal/ui"
@@ -22,9 +23,9 @@ func main() {
 	configPath := flag.String("config", "", "Path to config file (default: ~/.patreon-posts.json)")
 	dbPath := flag.String("db", "", "Path to SQLite database (default: ~/.patreon-posts.db)")
 	afterFlag := flag.String("after", "", "Only show posts published after this date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss]) or 'last'")
-    extractLinks := flag.Bool("extract-links", false, "Extract YouTube links from all campaigns and copy to clipboard")
-    forceRefresh := flag.Bool("force-refresh", false, "Force refresh post details when running --extract-links")
-    flag.Parse()
+	extractLinks := flag.Bool("extract-links", false, "Extract YouTube links from all campaigns and print them")
+	forceRefresh := flag.Bool("force-refresh", false, "Force refresh post details when running --extract-links")
+	flag.Parse()
 
 	runFlags := collectRunFlags()
 
@@ -46,10 +47,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Use cookies from flag or config
-	cookies := *cookiesFlag
-	if cookies == "" {
-		cookies = cfg.Cookies
+	// Resolve cookies: an explicit flag wins, then a browser profile, then the
+	// value stored in the config by a previous run.
+	if *cookiesFlag != "" {
+		cfg.Cookies = *cookiesFlag
+	} else if cfg.CookieSource != nil {
+		jar, err := cookies.Resolve(*cfg.CookieSource)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "⚠️  Could not read cookies from %s: %v\n", cfg.CookieSource.Type, err)
+			if cfg.Cookies != "" {
+				fmt.Fprintln(os.Stderr, "   Falling back to the cookies stored in the config.")
+			}
+		case jar.Header != "":
+			describeJar(jar)
+			// Persist so a later run still works if the browser is unavailable.
+			if jar.Header != cfg.Cookies {
+				cfg.Cookies = jar.Header
+				if err := config.Save(cfgPath, cfg); err != nil {
+					fmt.Fprintf(os.Stderr, "⚠️  Refreshed cookies but could not write %s: %v\n", cfgPath, err)
+				} else {
+					fmt.Printf("🔄 Stored refreshed session in %s\n", cfgPath)
+				}
+			}
+		}
 	}
 
 	// Determine database path
@@ -77,7 +98,7 @@ func main() {
 	}
 
 	// Warn if no cookies provided
-	if cookies == "" {
+	if cfg.Cookies == "" {
 		fmt.Println("⚠️  No cookies provided. You may not be able to view patron-only content.")
 		fmt.Printf("   Set cookies in %s or use --cookies flag.\n\n", cfgPath)
 	}
@@ -89,56 +110,56 @@ func main() {
 		publishedAfter = strings.TrimSpace(cfg.PublishedAfter)
 	}
 
-    if strings.EqualFold(publishedAfter, "last") {
-        // If extract-links mode is requested, prefer the most recent run that
-        // included the --extract-links flag. Otherwise fall back to the
-        // generic last run timestamp.
-        var lastRun *db.LastRunInfo
-        var err error
-        if *extractLinks {
-            lastRun, err = database.GetLastRunByFlag("--extract-links")
-            if err != nil {
-                fmt.Fprintf(os.Stderr, "Error reading last extract-links run info: %v\n", err)
-                os.Exit(1)
-            }
-            if lastRun == nil {
-                fmt.Fprintln(os.Stderr, "Error: no previous run found that used --extract-links. Run once with --extract-links to initialize.")
-                os.Exit(1)
-            }
-        } else {
-            lastRun, err = database.GetLastRun()
-            if err != nil {
-                fmt.Fprintf(os.Stderr, "Error reading last run info: %v\n", err)
-                os.Exit(1)
-            }
-            if lastRun == nil {
-                fmt.Fprintln(os.Stderr, "Error: no previous run found. Run once without --after last to initialize.")
-                os.Exit(1)
-            }
-        }
-        publishedAfter = datetime.FormatLocal(lastRun.RunAt)
-        fmt.Printf("📅 Using last run time: %s\n", publishedAfter)
-    } else if publishedAfter != "" {
-        if _, err := datetime.ParseLocal(publishedAfter); err != nil {
-            fmt.Fprintf(os.Stderr, "Error: invalid --after value: %v\n", err)
-            os.Exit(1)
-        }
-    }
+	if strings.EqualFold(publishedAfter, "last") {
+		// If extract-links mode is requested, prefer the most recent run that
+		// included the --extract-links flag. Otherwise fall back to the
+		// generic last run timestamp.
+		var lastRun *db.LastRunInfo
+		var err error
+		if *extractLinks {
+			lastRun, err = database.GetLastRunByFlag("--extract-links")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading last extract-links run info: %v\n", err)
+				os.Exit(1)
+			}
+			if lastRun == nil {
+				fmt.Fprintln(os.Stderr, "Error: no previous run found that used --extract-links. Run once with --extract-links to initialize.")
+				os.Exit(1)
+			}
+		} else {
+			lastRun, err = database.GetLastRun()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading last run info: %v\n", err)
+				os.Exit(1)
+			}
+			if lastRun == nil {
+				fmt.Fprintln(os.Stderr, "Error: no previous run found. Run once without --after last to initialize.")
+				os.Exit(1)
+			}
+		}
+		publishedAfter = datetime.FormatLocal(lastRun.RunAt)
+		fmt.Printf("📅 Using last run time: %s\n", publishedAfter)
+	} else if publishedAfter != "" {
+		if _, err := datetime.ParseLocal(publishedAfter); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid --after value: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
-    // Handle extract-links mode
-    if *extractLinks {
-        if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter, *forceRefresh); err != nil {
-            fmt.Fprintf(os.Stderr, "Error extracting links: %v\n", err)
-            os.Exit(1)
-        }
-        if err := database.SaveLastRun(time.Now(), runFlags); err != nil {
-            fmt.Fprintf(os.Stderr, "Warning: failed to save last run info: %v\n", err)
-        }
-        return
-    }
+	// Handle extract-links mode
+	if *extractLinks {
+		if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter, *forceRefresh); err != nil {
+			fmt.Fprintf(os.Stderr, "Error extracting links: %v\n", err)
+			os.Exit(1)
+		}
+		if err := database.SaveLastRun(time.Now(), runFlags); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save last run info: %v\n", err)
+		}
+		return
+	}
 
 	// Create and run the TUI
-	model := ui.NewModel(cookies, database, publishedAfter)
+	model := ui.NewModel(cfg.Cookies, database, publishedAfter)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
@@ -148,6 +169,19 @@ func main() {
 
 	if err := database.SaveLastRun(time.Now(), runFlags); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save last run info: %v\n", err)
+	}
+}
+
+// describeJar reports where the cookies came from and warns before the session
+// dies, since a dead session is the thing this whole lookup exists to avoid.
+func describeJar(jar cookies.Jar) {
+	fmt.Printf("🍪 Loaded %d cookie(s) from %s\n", len(jar.Names), jar.Profile)
+	if jar.SessionExpiry.IsZero() {
+		return
+	}
+	if left := time.Until(jar.SessionExpiry); left < 7*24*time.Hour {
+		fmt.Printf("⚠️  Patreon session expires %s (~%d day(s)); sign in again in your browser soon.\n",
+			datetime.FormatLocal(jar.SessionExpiry), int(left.Hours()/24))
 	}
 }
 
