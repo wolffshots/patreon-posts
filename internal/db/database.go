@@ -1,16 +1,16 @@
 package db
 
 import (
-    "database/sql"
-    "encoding/json"
-    "fmt"
-    "os"
-    "path/filepath"
-    "time"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
-    "patreon-posts/internal/datetime"
+	"patreon-posts/internal/datetime"
 
-    _ "modernc.org/sqlite"
+	_ "modernc.org/sqlite"
 )
 
 // Database handles SQLite operations
@@ -72,7 +72,7 @@ func (d *Database) Close() error {
 }
 
 func (d *Database) migrate() error {
-    schema := `
+	schema := `
 	CREATE TABLE IF NOT EXISTS campaigns (
 		id TEXT PRIMARY KEY,
 		name TEXT,
@@ -130,44 +130,44 @@ func (d *Database) migrate() error {
 
 // LastRunInfo represents metadata about the most recent run.
 type LastRunInfo struct {
-    RunAt time.Time
-    Flags []string
+	RunAt time.Time
+	Flags []string
 }
 
 // SaveLastRun stores the last run timestamp and provided flags.
 func (d *Database) SaveLastRun(runAt time.Time, flags []string) error {
-    flagsJSON, err := json.Marshal(flags)
-    if err != nil {
-        return fmt.Errorf("failed to marshal run flags: %w", err)
-    }
+	flagsJSON, err := json.Marshal(flags)
+	if err != nil {
+		return fmt.Errorf("failed to marshal run flags: %w", err)
+	}
 
-    runAtStr := datetime.FormatLocal(runAt)
-    // Insert into run history
-    if _, err = d.db.Exec(`
+	runAtStr := datetime.FormatLocal(runAt)
+	// Insert into run history
+	if _, err = d.db.Exec(`
         INSERT INTO app_runs (run_at, run_flags) VALUES (?, ?)
     `, runAtStr, string(flagsJSON)); err != nil {
-        return fmt.Errorf("failed to insert run history: %w", err)
-    }
+		return fmt.Errorf("failed to insert run history: %w", err)
+	}
 
-    // Update single-row app_state for quick access to last run
-    _, err = d.db.Exec(`
+	// Update single-row app_state for quick access to last run
+	_, err = d.db.Exec(`
         INSERT INTO app_state (id, last_run_at, last_run_flags)
         VALUES (1, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             last_run_at = excluded.last_run_at,
             last_run_flags = excluded.last_run_flags
     `, runAtStr, string(flagsJSON))
-    if err != nil {
-        return fmt.Errorf("failed to save last run info: %w", err)
-    }
-    return nil
+	if err != nil {
+		return fmt.Errorf("failed to save last run info: %w", err)
+	}
+	return nil
 }
 
 // GetLastRunByFlag returns the most recent run record where the flags text
 // contains the provided substring (simple heuristic). If no matching run is
 // found, returns (nil, nil).
 func (d *Database) GetLastRunByFlag(flagSubstring string) (*LastRunInfo, error) {
-    row := d.db.QueryRow(`
+	row := d.db.QueryRow(`
         SELECT run_at, run_flags
         FROM app_runs
         WHERE run_flags LIKE ?
@@ -175,56 +175,56 @@ func (d *Database) GetLastRunByFlag(flagSubstring string) (*LastRunInfo, error) 
         LIMIT 1
     `, "%"+flagSubstring+"%")
 
-    var runAtStr string
-    var flagsJSON string
-    if err := row.Scan(&runAtStr, &flagsJSON); err != nil {
-        if err == sql.ErrNoRows {
-            return nil, nil
-        }
-        return nil, err
-    }
+	var runAtStr string
+	var flagsJSON string
+	if err := row.Scan(&runAtStr, &flagsJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
 
-    runAt, err := datetime.ParseLocal(runAtStr)
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse run timestamp %q: %w", runAtStr, err)
-    }
+	runAt, err := datetime.ParseLocal(runAtStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse run timestamp %q: %w", runAtStr, err)
+	}
 
-    var flags []string
-    if err := json.Unmarshal([]byte(flagsJSON), &flags); err != nil {
-        return nil, fmt.Errorf("failed to parse run flags: %w", err)
-    }
+	var flags []string
+	if err := json.Unmarshal([]byte(flagsJSON), &flags); err != nil {
+		return nil, fmt.Errorf("failed to parse run flags: %w", err)
+	}
 
-    return &LastRunInfo{RunAt: runAt, Flags: flags}, nil
+	return &LastRunInfo{RunAt: runAt, Flags: flags}, nil
 }
 
 // GetLastRun retrieves the most recent run metadata.
 func (d *Database) GetLastRun() (*LastRunInfo, error) {
-    row := d.db.QueryRow(`
+	row := d.db.QueryRow(`
         SELECT last_run_at, last_run_flags
         FROM app_state
         WHERE id = 1
     `)
 
-    var runAtStr string
-    var flagsJSON string
-    if err := row.Scan(&runAtStr, &flagsJSON); err != nil {
-        if err == sql.ErrNoRows {
-            return nil, nil
-        }
-        return nil, err
-    }
+	var runAtStr string
+	var flagsJSON string
+	if err := row.Scan(&runAtStr, &flagsJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
 
-    runAt, err := datetime.ParseLocal(runAtStr)
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse last run timestamp %q: %w", runAtStr, err)
-    }
+	runAt, err := datetime.ParseLocal(runAtStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse last run timestamp %q: %w", runAtStr, err)
+	}
 
-    var flags []string
-    if err := json.Unmarshal([]byte(flagsJSON), &flags); err != nil {
-        return nil, fmt.Errorf("failed to parse last run flags: %w", err)
-    }
+	var flags []string
+	if err := json.Unmarshal([]byte(flagsJSON), &flags); err != nil {
+		return nil, fmt.Errorf("failed to parse last run flags: %w", err)
+	}
 
-    return &LastRunInfo{RunAt: runAt, Flags: flags}, nil
+	return &LastRunInfo{RunAt: runAt, Flags: flags}, nil
 }
 
 // SaveCampaign saves or updates a campaign

@@ -87,12 +87,12 @@ type PostDetailData struct {
 
 // PostDetailAttributes contains detailed post attributes
 type PostDetailAttributes struct {
-	Title       string    `json:"title"`
-	Content     string    `json:"content"`
-	ContentJSONString     string    `json:"content_json_string"`
-	PostType    string    `json:"post_type"`
-	PublishedAt time.Time `json:"published_at"`
-	Embed       Embed     `json:"embed"`
+	Title             string    `json:"title"`
+	Content           string    `json:"content"`
+	ContentJSONString string    `json:"content_json_string"`
+	PostType          string    `json:"post_type"`
+	PublishedAt       time.Time `json:"published_at"`
+	Embed             Embed     `json:"embed"`
 }
 
 // Embed contains embedded content info
