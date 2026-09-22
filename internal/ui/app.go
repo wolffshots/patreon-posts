@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -16,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"patreon-posts/internal/api"
+	"patreon-posts/internal/config"
 	"patreon-posts/internal/datetime"
 	"patreon-posts/internal/db"
 	"patreon-posts/internal/models"
@@ -23,12 +26,27 @@ import (
 
 // Styles
 var (
-	titleStyle = lipgloss.NewStyle().
+	accent = lipgloss.Color("#FF424D")
+	dim    = lipgloss.Color("#666680")
+
+	titleStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	dimStyle   = lipgloss.NewStyle().Foreground(dim)
+	warnStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24"))
+
+	tabActiveStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#1a1a2e")).
+			Background(accent).
 			Bold(true).
-			Foreground(lipgloss.Color("#FF424D")).
-			Background(lipgloss.Color("#1a1a2e")).
-			Padding(0, 2).
-			MarginBottom(0)
+			Padding(0, 2)
+
+	tabInactiveStyle = lipgloss.NewStyle().Foreground(dim).Padding(0, 2)
+	tabBarStyle      = lipgloss.NewStyle().Padding(0, 0, 1, 0)
+
+	footerStyle = lipgloss.NewStyle().
+			Foreground(dim).
+			BorderTop(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#3d3d5c"))
 
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -39,7 +57,7 @@ var (
 
 	selectedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#1a1a2e")).
-			Background(lipgloss.Color("#FF424D")).
+			Background(accent).
 			Bold(true).
 			Padding(0, 1)
 
@@ -63,32 +81,16 @@ var (
 			Foreground(lipgloss.Color("#5c9eff")).
 			Underline(true)
 
-	inputStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#FF424D")).
-			Padding(0, 1)
-
-	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666680")).
-			Italic(true).
-			MarginTop(1)
-
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#ff6b6b")).
-			Bold(true).
-			Padding(1)
-
-	statusBarStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666680")).
-			Background(lipgloss.Color("#1a1a2e")).
-			Padding(0, 1)
+			Bold(true)
 
 	cachedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#00D4AA")).
 			Bold(true)
 
 	notCachedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666680"))
+			Foreground(dim)
 
 	youtubeStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FF0000")).
@@ -98,16 +100,6 @@ var (
 				Foreground(lipgloss.Color("#b0b0b0")).
 				PaddingLeft(2)
 
-	// Clipboard panel styles
-	clipboardPanelStyle = lipgloss.NewStyle().
-				Padding(0, 1).
-				MarginLeft(1)
-
-	clipboardTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#FF424D")).
-				MarginBottom(1)
-
 	clipboardLinkStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#5c9eff"))
 
@@ -115,10 +107,6 @@ var (
 				Foreground(lipgloss.Color("#1a1a2e")).
 				Background(lipgloss.Color("#5c9eff")).
 				Bold(true)
-
-	clipboardEmptyStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#666680")).
-				Italic(true)
 
 	successStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#00D4AA")).
@@ -130,7 +118,17 @@ var (
 				Bold(true)
 )
 
-// View states
+// Tabs
+type tab int
+
+const (
+	tabPosts tab = iota
+	tabLists
+)
+
+var tabNames = []string{"Posts", "Lists"}
+
+// View states of the Posts tab
 type viewState int
 
 const (
@@ -150,10 +148,130 @@ const (
 	uiRateLimitBaseWait    = 60 * time.Second
 )
 
-const clipboardPanelWidth = 45
+const (
+	clipboardPanelWidth = 45
+	// wideLayout is the narrowest terminal that still fits the clipboard frame
+	// beside a usable main frame.
+	wideLayout = 100
+)
+
+// ---- Keys ---------------------------------------------------------------
+
+type keyMap struct {
+	PostsTab, ListsTab, Help, Quit key.Binding
+
+	Up, Down key.Binding
+
+	Copy, Remove, Clear, ClipUp, ClipDown key.Binding
+
+	// Campaign selection
+	Select, NewCampaign, Filter, Delete, Exit key.Binding
+	// Text entry
+	Confirm, Cancel key.Binding
+	// Posts list
+	Open, NextPage, PrevPage, Refresh, ForceRefresh, Back key.Binding
+	// Post details
+	AddLink, AddAll, PageUp, PageDown key.Binding
+	// Error and rate limit
+	Retry, CancelWait key.Binding
+	// Lists
+	Toggle, ListAdd, NewList key.Binding
+}
+
+func newKeyMap() keyMap {
+	return keyMap{
+		PostsTab: key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "posts")),
+		ListsTab: key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "lists")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+
+		Up:   key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+
+		Copy:     key.NewBinding(key.WithKeys("c", "y"), key.WithHelp("c/y", "copy clipboard")),
+		Remove:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove link")),
+		Clear:    key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "clear clipboard")),
+		ClipUp:   key.NewBinding(key.WithKeys("["), key.WithHelp("[", "clipboard up")),
+		ClipDown: key.NewBinding(key.WithKeys("]"), key.WithHelp("]", "clipboard down")),
+
+		Select:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "load posts")),
+		NewCampaign: key.NewBinding(key.WithKeys("n", "a"), key.WithHelp("n/a", "new campaign")),
+		Filter:      key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "date filter")),
+		Delete:      key.NewBinding(key.WithKeys("d", "delete"), key.WithHelp("d", "delete")),
+		Exit:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
+
+		Confirm: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "continue")),
+		Cancel:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+
+		Open:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view post")),
+		NextPage:     key.NewBinding(key.WithKeys("n", "l", "right"), key.WithHelp("n/→", "next page")),
+		PrevPage:     key.NewBinding(key.WithKeys("p", "h", "left"), key.WithHelp("p/←", "prev page")),
+		Refresh:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		ForceRefresh: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "force refresh")),
+		Back:         key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
+
+		AddLink:  key.NewBinding(key.WithKeys("a", "enter"), key.WithHelp("a", "add link")),
+		AddAll:   key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "add all")),
+		PageUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),
+		PageDown: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll down")),
+
+		Retry:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "retry")),
+		CancelWait: key.NewBinding(key.WithKeys("c", "esc"), key.WithHelp("c", "cancel")),
+
+		Toggle:  key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "expand")),
+		ListAdd: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add to clipboard")),
+		NewList: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new list")),
+	}
+}
+
+// helpKeys is the footer for one screen: a column per group of keys.
+type helpKeys [][]key.Binding
+
+func (h helpKeys) ShortHelp() []key.Binding {
+	var out []key.Binding
+	for _, col := range h {
+		out = append(out, col...)
+	}
+	return out
+}
+
+func (h helpKeys) FullHelp() [][]key.Binding { return h }
+
+// currentKeys names the keys the screen on show answers to.
+func (m Model) currentKeys() helpKeys {
+	k := m.keys
+	clip := []key.Binding{k.Copy, k.Remove, k.Clear, k.ClipUp, k.ClipDown}
+	global := []key.Binding{k.PostsTab, k.ListsTab, k.Help, k.Quit}
+
+	if m.tab == tabLists {
+		return helpKeys{{k.Up, k.Down, k.Toggle, k.ListAdd, k.NewList}, clip, global}
+	}
+	switch m.state {
+	case stateInput:
+		if m.typing() {
+			return helpKeys{{k.Confirm, k.Cancel}}
+		}
+		return helpKeys{{k.Up, k.Down, k.Select, k.NewCampaign, k.Filter, k.Delete, k.Exit}, clip, global}
+	case stateList:
+		return helpKeys{{k.Up, k.Down, k.Open, k.NextPage, k.PrevPage, k.Refresh, k.ForceRefresh, k.Back}, clip, global}
+	case stateDetails:
+		return helpKeys{{k.Up, k.Down, k.AddLink, k.AddAll, k.PageUp, k.PageDown, k.ForceRefresh, k.Back}, clip, global}
+	case stateError:
+		return helpKeys{{k.Retry, k.Back}, global}
+	case stateRateLimited:
+		return helpKeys{{k.Retry, k.CancelWait}, global}
+	}
+	return helpKeys{global}
+}
+
+// ---- Model --------------------------------------------------------------
 
 // Model represents the TUI state
 type Model struct {
+	tab             tab
+	keys            keyMap
+	help            help.Model
+	cfg             *config.Config
 	state           viewState
 	posts           []models.Post
 	cursor          int
@@ -196,6 +314,8 @@ type Model struct {
 	pendingKind      string // "posts" or "details"
 	pendingCursor    string
 	pendingPostID    string
+	// The Lists tab
+	lists listsState
 }
 
 // PostsFetchedMsg is sent when posts are fetched
@@ -216,12 +336,6 @@ type PostDetailsFetchedMsg struct {
 	PostID  string // so a retry knows what to re-request
 }
 
-// CacheUpdatedMsg is sent when cache status is updated
-type CacheUpdatedMsg struct {
-	PostID string
-	Cached bool
-}
-
 // rateLimitTickMsg drives the countdown while waiting out a rate limit.
 type rateLimitTickMsg time.Time
 
@@ -231,7 +345,7 @@ type CampaignsLoadedMsg struct {
 }
 
 // NewModel creates a new TUI model
-func NewModel(cookies string, database *db.Database, publishedAfter string) Model {
+func NewModel(cfg *config.Config, database *db.Database, publishedAfter string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Enter campaign ID (e.g., 2175699)"
 	ti.Focus()
@@ -250,13 +364,16 @@ func NewModel(cookies string, database *db.Database, publishedAfter string) Mode
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF424D"))
+	s.Style = lipgloss.NewStyle().Foreground(accent)
 
 	vp := viewport.New(80, 20)
 
 	return Model{
+		keys:           newKeyMap(),
+		help:           help.New(),
+		cfg:            cfg,
 		state:          stateInput,
-		client:         api.NewClient(cookies),
+		client:         api.NewClient(cfg.Cookies),
 		database:       database,
 		input:          ti,
 		nameInput:      ni,
@@ -269,6 +386,7 @@ func NewModel(cookies string, database *db.Database, publishedAfter string) Mode
 		cursorHistory:  make([]string, 0),
 		currentPage:    1,
 		publishedAfter: publishedAfter,
+		lists:          listsState{open: map[int64]bool{}},
 	}
 }
 
@@ -287,101 +405,28 @@ func (m Model) loadCampaigns() tea.Cmd {
 	}
 }
 
+// typing reports whether a text input has the keyboard, so letter and number
+// keys belong to it rather than to a binding.
+func (m Model) typing() bool {
+	return m.tab == tabPosts && m.state == stateInput && m.inputStep != 0
+}
+
 // Update handles messages and updates state
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Clear status message on any key press
-	if _, ok := msg.(tea.KeyMsg); ok {
-		m.statusMessage = ""
-	}
-
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle global keys first
-		switch msg.String() {
-		case "ctrl+c", "esc":
-			// Always allow quit with Ctrl+C or Esc from input screen
-			if m.state == stateInput {
-				return m, tea.Quit
-			}
-		case "q":
-			// Only quit with 'q' if not in input mode
-			if m.state != stateInput {
-				return m, tea.Quit
-			}
-		case "c", "y":
-			// Copy clipboard to system clipboard (works in list and details view)
-			if m.state == stateList || m.state == stateDetails {
-				if len(m.clipboardLinks) > 0 {
-					text := strings.Join(m.clipboardLinks, "\n")
-					if err := clipboard.WriteAll(text); err == nil {
-						m.statusMessage = fmt.Sprintf("✓ Copied %d links to clipboard!", len(m.clipboardLinks))
-					} else {
-						m.statusMessage = "✗ Failed to copy to clipboard"
-					}
-				} else {
-					m.statusMessage = "Clipboard is empty"
-				}
-				return m, nil
-			}
-		case "x":
-			// Remove selected link from clipboard (works in list and details view)
-			if (m.state == stateList || m.state == stateDetails) && len(m.clipboardLinks) > 0 {
-				m.clipboardLinks = append(m.clipboardLinks[:m.clipboardCursor], m.clipboardLinks[m.clipboardCursor+1:]...)
-				if m.clipboardCursor >= len(m.clipboardLinks) && m.clipboardCursor > 0 {
-					m.clipboardCursor--
-				}
-				m.statusMessage = "Removed link from clipboard"
-				return m, nil
-			}
-		case "X":
-			// Clear entire clipboard
-			if m.state == stateList || m.state == stateDetails {
-				m.clipboardLinks = make([]string, 0)
-				m.clipboardCursor = 0
-				m.statusMessage = "Cleared clipboard"
-				return m, nil
-			}
-		case "[":
-			// Move clipboard cursor up
-			if (m.state == stateList || m.state == stateDetails) && m.clipboardCursor > 0 {
-				m.clipboardCursor--
-				return m, nil
-			}
-		case "]":
-			// Move clipboard cursor down
-			if (m.state == stateList || m.state == stateDetails) && m.clipboardCursor < len(m.clipboardLinks)-1 {
-				m.clipboardCursor++
-				return m, nil
-			}
-		}
-
-		// Handle state-specific keys
-		switch m.state {
-		case stateInput:
-			return m.handleInputKeys(msg)
-
-		case stateList:
-			return m.handleListKeys(msg)
-
-		case stateDetails:
-			return m.handleDetailsKeys(msg)
-
-		case stateError:
-			return m.handleErrorKeys(msg)
-
-		case stateRateLimited:
-			return m.handleRateLimitKeys(msg)
-		}
+		// Clear status message on any key press
+		m.statusMessage = ""
+		return m.handleKey(msg)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		mainWidth := msg.Width - clipboardPanelWidth - 3
-		if mainWidth < 40 {
-			mainWidth = 40
+		m.help.Width = msg.Width
+		m.sizeViewport()
+		if m.state == stateDetails {
+			m.viewport.SetContent(m.renderDetailsContent())
 		}
-		m.viewport.Width = mainWidth - 4
-		m.viewport.Height = msg.Height - 10
 		return m, nil
 
 	case PostsFetchedMsg:
@@ -482,6 +527,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.resumePending()
 
+	case runsLoadedMsg, runStartedMsg, runLinkMsg, runLogMsg, runStatusMsg, runDoneMsg:
+		return m.updateLists(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -498,17 +546,147 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Ctrl+C quits from anywhere, a text box included.
+	if msg.Type == tea.KeyCtrlC {
+		return m, tea.Quit
+	}
+	if m.typing() {
+		return m.handleInputKeys(msg)
+	}
+
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, m.keys.Help):
+		m.help.ShowAll = !m.help.ShowAll
+		m.sizeViewport()
+		return m, nil
+	case key.Matches(msg, m.keys.PostsTab):
+		m.tab = tabPosts
+		return m, nil
+	case key.Matches(msg, m.keys.ListsTab):
+		m.tab = tabLists
+		return m, m.loadRuns()
+	}
+
+	if m.clipboardKeysActive() {
+		if handled, ok := m.handleClipboardKeys(msg); ok {
+			return handled, nil
+		}
+	}
+
+	if m.tab == tabLists {
+		return m.handleListsKeys(msg)
+	}
+
+	switch m.state {
+	case stateInput:
+		return m.handleInputKeys(msg)
+	case stateList:
+		return m.handleListKeys(msg)
+	case stateDetails:
+		return m.handleDetailsKeys(msg)
+	case stateError:
+		return m.handleErrorKeys(msg)
+	case stateRateLimited:
+		return m.handleRateLimitKeys(msg)
+	}
+	return m, nil
+}
+
+// clipboardKeysActive reports whether the clipboard keys apply here. The rate
+// limit screen is left out because c cancels the wait there.
+func (m Model) clipboardKeysActive() bool {
+	if m.tab == tabLists {
+		return true
+	}
+	switch m.state {
+	case stateList, stateDetails:
+		return true
+	case stateInput:
+		return m.inputStep == 0
+	}
+	return false
+}
+
+func (m Model) handleClipboardKeys(msg tea.KeyMsg) (Model, bool) {
+	switch {
+	case key.Matches(msg, m.keys.Copy):
+		// Copy clipboard to system clipboard
+		if len(m.clipboardLinks) > 0 {
+			text := strings.Join(m.clipboardLinks, "\n")
+			if err := clipboard.WriteAll(text); err == nil {
+				m.statusMessage = fmt.Sprintf("✓ Copied %d links to clipboard!", len(m.clipboardLinks))
+			} else {
+				m.statusMessage = "✗ Failed to copy to clipboard"
+			}
+		} else {
+			m.statusMessage = "Clipboard is empty"
+		}
+	case key.Matches(msg, m.keys.Remove):
+		// Remove selected link from clipboard
+		if len(m.clipboardLinks) == 0 {
+			return m, true
+		}
+		m.clipboardLinks = append(m.clipboardLinks[:m.clipboardCursor], m.clipboardLinks[m.clipboardCursor+1:]...)
+		if m.clipboardCursor >= len(m.clipboardLinks) && m.clipboardCursor > 0 {
+			m.clipboardCursor--
+		}
+		m.statusMessage = "Removed link from clipboard"
+	case key.Matches(msg, m.keys.Clear):
+		m.clipboardLinks = make([]string, 0)
+		m.clipboardCursor = 0
+		m.statusMessage = "Cleared clipboard"
+	case key.Matches(msg, m.keys.ClipUp):
+		if m.clipboardCursor > 0 {
+			m.clipboardCursor--
+		}
+	case key.Matches(msg, m.keys.ClipDown):
+		if m.clipboardCursor < len(m.clipboardLinks)-1 {
+			m.clipboardCursor++
+		}
+	default:
+		return m, false
+	}
+	if m.state == stateDetails {
+		// The details view marks links already in the clipboard.
+		m.viewport.SetContent(m.renderDetailsContent())
+	}
+	return m, true
+}
+
+// addToClipboard appends the links not already collected and returns how many
+// were new.
+func (m *Model) addToClipboard(links ...string) int {
+	added := 0
+	for _, link := range links {
+		exists := false
+		for _, existing := range m.clipboardLinks {
+			if existing == link {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			m.clipboardLinks = append(m.clipboardLinks, link)
+			added++
+		}
+	}
+	return added
+}
+
 func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "up", "k":
+	switch {
+	case key.Matches(msg, m.keys.Up):
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case "down", "j":
+	case key.Matches(msg, m.keys.Down):
 		if m.cursor < len(m.posts)-1 {
 			m.cursor++
 		}
-	case "enter":
+	case key.Matches(msg, m.keys.Open):
 		if len(m.posts) > 0 {
 			post := m.posts[m.cursor]
 			// Check cache first
@@ -536,7 +714,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingMsg = "Fetching post details..."
 			return m, tea.Batch(m.spinner.Tick, m.fetchPostDetails(post.ID))
 		}
-	case "r":
+	case key.Matches(msg, m.keys.Refresh):
 		// Refresh current page (from cache if available)
 		m.state = stateLoading
 		m.loadingMsg = "Refreshing posts..."
@@ -546,7 +724,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cursor = m.cursorHistory[len(m.cursorHistory)-1]
 		}
 		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor, false))
-	case "R":
+	case key.Matches(msg, m.keys.ForceRefresh):
 		// Force refresh - clear cache and go back to page 1
 		if m.database != nil {
 			m.database.ClearCampaignPages(m.campaignID)
@@ -556,15 +734,8 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateLoading
 		m.loadingMsg = "Force refreshing posts..."
 		return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", true))
-	case "n", "l", "right":
-		// Next page
-		// Don't allow next page if filter is active and we have fewer posts than page size
-		// (indicates the filter removed posts, not that there are no more pages)
-		canGoNext := m.hasMorePages && m.nextCursor != ""
-		if m.publishedAfter != "" && len(m.posts) < 20 {
-			canGoNext = false
-		}
-		if canGoNext {
+	case key.Matches(msg, m.keys.NextPage):
+		if m.canGoNext() {
 			// Save current cursor to history for going back
 			if m.currentPage == 1 {
 				m.cursorHistory = append(m.cursorHistory, "")
@@ -575,8 +746,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingMsg = fmt.Sprintf("Loading page %d...", m.currentPage)
 			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(m.nextCursor, false))
 		}
-	case "p", "h", "left":
-		// Previous page
+	case key.Matches(msg, m.keys.PrevPage):
 		if m.currentPage > 1 && len(m.cursorHistory) > 0 {
 			m.currentPage--
 			// Pop the current cursor from history
@@ -590,7 +760,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingMsg = fmt.Sprintf("Loading page %d...", m.currentPage)
 			return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor, false))
 		}
-	case "esc":
+	case key.Matches(msg, m.keys.Back):
 		m.state = stateInput
 		m.input.SetValue("")
 		m.inputStep = 0
@@ -599,15 +769,25 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// canGoNext reports whether a next page exists. A filter that removed posts
+// leaves fewer than a page, which means the rest is older than the filter,
+// not that the campaign has run out.
+func (m Model) canGoNext() bool {
+	if m.publishedAfter != "" && len(m.posts) < 20 {
+		return false
+	}
+	return m.hasMorePages && m.nextCursor != ""
+}
+
 func (m Model) handleDetailsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "backspace":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		m.state = stateList
 		m.postDetails = nil
 		m.cachedDetails = nil
 		m.linkCursor = 0
 		return m, nil
-	case "R":
+	case key.Matches(msg, m.keys.ForceRefresh):
 		// Force refresh this post's details
 		if len(m.posts) > 0 {
 			post := m.posts[m.cursor]
@@ -620,66 +800,49 @@ func (m Model) handleDetailsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingMsg = "Force refreshing post details..."
 			return m, tea.Batch(m.spinner.Tick, m.fetchPostDetails(post.ID))
 		}
-	case "up", "k":
+	case key.Matches(msg, m.keys.Up):
 		// Navigate YouTube links
 		if m.postDetails != nil && len(m.postDetails.YouTubeLinks) > 0 && m.linkCursor > 0 {
 			m.linkCursor--
 			m.viewport.SetContent(m.renderDetailsContent())
 		}
-	case "down", "j":
+	case key.Matches(msg, m.keys.Down):
 		// Navigate YouTube links
 		if m.postDetails != nil && len(m.postDetails.YouTubeLinks) > 0 && m.linkCursor < len(m.postDetails.YouTubeLinks)-1 {
 			m.linkCursor++
 			m.viewport.SetContent(m.renderDetailsContent())
 		}
-	case "a", "enter":
+	case key.Matches(msg, m.keys.AddLink):
 		// Add selected YouTube link to clipboard
 		if m.postDetails != nil && len(m.postDetails.YouTubeLinks) > 0 {
-			link := m.postDetails.YouTubeLinks[m.linkCursor]
-			// Check if already in clipboard
-			for _, existing := range m.clipboardLinks {
-				if existing == link {
-					m.statusMessage = "Link already in clipboard"
-					return m, nil
-				}
+			if m.addToClipboard(m.postDetails.YouTubeLinks[m.linkCursor]) == 0 {
+				m.statusMessage = "Link already in clipboard"
+			} else {
+				m.statusMessage = "✓ Added link to clipboard"
 			}
-			m.clipboardLinks = append(m.clipboardLinks, link)
-			m.statusMessage = "✓ Added link to clipboard"
+			m.viewport.SetContent(m.renderDetailsContent())
 		}
-	case "A":
+	case key.Matches(msg, m.keys.AddAll):
 		// Add ALL YouTube links to clipboard
 		if m.postDetails != nil && len(m.postDetails.YouTubeLinks) > 0 {
-			added := 0
-			for _, link := range m.postDetails.YouTubeLinks {
-				exists := false
-				for _, existing := range m.clipboardLinks {
-					if existing == link {
-						exists = true
-						break
-					}
-				}
-				if !exists {
-					m.clipboardLinks = append(m.clipboardLinks, link)
-					added++
-				}
-			}
-			if added > 0 {
+			if added := m.addToClipboard(m.postDetails.YouTubeLinks...); added > 0 {
 				m.statusMessage = fmt.Sprintf("✓ Added %d links to clipboard", added)
 			} else {
 				m.statusMessage = "All links already in clipboard"
 			}
+			m.viewport.SetContent(m.renderDetailsContent())
 		}
-	case "pgup":
+	case key.Matches(msg, m.keys.PageUp):
 		m.viewport.HalfViewUp()
-	case "pgdown":
+	case key.Matches(msg, m.keys.PageDown):
 		m.viewport.HalfViewDown()
 	}
 	return m, nil
 }
 
 func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "r":
+	switch {
+	case key.Matches(msg, m.keys.Retry):
 		m.state = stateLoading
 		m.loadingMsg = "Retrying..."
 		// Retry with current page's cursor (bypass cache on retry)
@@ -688,7 +851,7 @@ func (m Model) handleErrorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cursor = m.cursorHistory[len(m.cursorHistory)-1]
 		}
 		return m, tea.Batch(m.spinner.Tick, m.fetchPosts(cursor, true))
-	case "esc":
+	case key.Matches(msg, m.keys.Back):
 		m.state = stateInput
 		m.input.SetValue("")
 		m.inputStep = 0
@@ -757,10 +920,10 @@ func (m Model) resumePending() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleRateLimitKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "r":
+	switch {
+	case key.Matches(msg, m.keys.Retry):
 		return m.resumePending()
-	case "c", "esc":
+	case key.Matches(msg, m.keys.CancelWait):
 		m.state = stateError
 		m.err = fmt.Errorf("rate limited by Patreon (HTTP %d); wait cancelled", m.rateLimitStatus)
 		m.rateLimitAttempt = 0
@@ -769,31 +932,11 @@ func (m Model) handleRateLimitKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) viewRateLimited() string {
-	remaining := time.Until(m.rateLimitUntil)
-	if remaining < 0 {
-		remaining = 0
-	}
-
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
-	b.WriteString("\n\n")
-	b.WriteString(errorStyle.Render(fmt.Sprintf("⏳ Rate limited by Patreon (HTTP %d)", m.rateLimitStatus)))
-	b.WriteString("\n\n")
-	b.WriteString(fmt.Sprintf("Retrying in %02d:%02d  (attempt %d of %d)",
-		int(remaining.Seconds())/60, int(remaining.Seconds())%60,
-		m.rateLimitAttempt, uiRateLimitMaxAttempts))
-	b.WriteString("\n\n")
-	b.WriteString(helpStyle.Render("r retry now • c cancel • q quit"))
-
-	return b.String()
-}
-
 func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.inputStep {
 	case 1: // Entering campaign ID
-		switch msg.String() {
-		case "enter":
+		switch {
+		case key.Matches(msg, m.keys.Confirm):
 			if m.input.Value() != "" {
 				// Move to name entry step
 				m.pendingID = m.input.Value()
@@ -803,7 +946,7 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.nameInput.Focus()
 				return m, textinput.Blink
 			}
-		case "esc":
+		case key.Matches(msg, m.keys.Cancel):
 			// If we have saved campaigns, go back to selection mode
 			if len(m.savedCampaigns) > 0 {
 				m.inputStep = 0
@@ -821,8 +964,8 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case 2: // Entering campaign name
-		switch msg.String() {
-		case "enter":
+		switch {
+		case key.Matches(msg, m.keys.Confirm):
 			// Move to date filter step
 			m.campaignName = m.nameInput.Value()
 			m.inputStep = 3
@@ -830,7 +973,7 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dateInput.SetValue(m.publishedAfter)
 			m.dateInput.Focus()
 			return m, textinput.Blink
-		case "esc":
+		case key.Matches(msg, m.keys.Cancel):
 			// Go back to ID entry
 			m.inputStep = 1
 			m.nameInput.Blur()
@@ -843,8 +986,8 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case 3: // Entering date filter
-		switch msg.String() {
-		case "enter":
+		switch {
+		case key.Matches(msg, m.keys.Confirm):
 			input := strings.TrimSpace(m.dateInput.Value())
 			if input != "" {
 				if _, err := datetime.ParseLocal(input); err != nil {
@@ -874,7 +1017,7 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingMsg = "Fetching posts..."
 			m.pendingID = ""
 			return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
-		case "esc":
+		case key.Matches(msg, m.keys.Cancel):
 			if m.editingDateOnly {
 				// Go back to selection mode
 				m.inputStep = 0
@@ -894,16 +1037,16 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	default: // inputStep 0: Selection mode (choosing from saved campaigns)
-		switch msg.String() {
-		case "up", "k":
+		switch {
+		case key.Matches(msg, m.keys.Up):
 			if m.campaignCursor > 0 {
 				m.campaignCursor--
 			}
-		case "down", "j":
+		case key.Matches(msg, m.keys.Down):
 			if m.campaignCursor < len(m.savedCampaigns)-1 {
 				m.campaignCursor++
 			}
-		case "enter":
+		case key.Matches(msg, m.keys.Select):
 			if len(m.savedCampaigns) > 0 {
 				selected := m.savedCampaigns[m.campaignCursor]
 				m.campaignID = selected.ID
@@ -914,13 +1057,13 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.loadingMsg = "Fetching posts..."
 				return m, tea.Batch(m.spinner.Tick, m.fetchPosts("", false))
 			}
-		case "n", "a":
+		case key.Matches(msg, m.keys.NewCampaign):
 			// Switch to input mode to add new campaign
 			m.inputStep = 1
 			m.input.SetValue("")
 			m.input.Focus()
 			return m, textinput.Blink
-		case "d", "delete":
+		case key.Matches(msg, m.keys.Delete):
 			// Delete selected campaign
 			if len(m.savedCampaigns) > 0 {
 				selected := m.savedCampaigns[m.campaignCursor]
@@ -930,43 +1073,14 @@ func (m Model) handleInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Reload campaigns
 				return m, m.loadCampaigns()
 			}
-		case "f":
+		case key.Matches(msg, m.keys.Filter):
 			// Edit date filter
 			m.inputStep = 3
 			m.editingDateOnly = true
 			m.dateInput.SetValue(m.publishedAfter)
 			m.dateInput.Focus()
 			return m, textinput.Blink
-		// Clipboard operations
-		case "c", "y":
-			if len(m.clipboardLinks) > 0 {
-				allLinks := strings.Join(m.clipboardLinks, "\n")
-				clipboard.WriteAll(allLinks)
-				m.statusMessage = fmt.Sprintf("Copied %d links", len(m.clipboardLinks))
-			}
-		case "x":
-			// Remove selected link from clipboard
-			if len(m.clipboardLinks) > 0 && m.clipboardCursor < len(m.clipboardLinks) {
-				m.clipboardLinks = append(m.clipboardLinks[:m.clipboardCursor], m.clipboardLinks[m.clipboardCursor+1:]...)
-				if m.clipboardCursor >= len(m.clipboardLinks) && m.clipboardCursor > 0 {
-					m.clipboardCursor--
-				}
-			}
-		case "X":
-			// Clear entire clipboard
-			m.clipboardLinks = make([]string, 0)
-			m.clipboardCursor = 0
-		case "[":
-			// Navigate clipboard up
-			if m.clipboardCursor > 0 {
-				m.clipboardCursor--
-			}
-		case "]":
-			// Navigate clipboard down
-			if m.clipboardCursor < len(m.clipboardLinks)-1 {
-				m.clipboardCursor++
-			}
-		case "esc", "ctrl+c":
+		case key.Matches(msg, m.keys.Exit):
 			return m, tea.Quit
 		}
 	}
@@ -1042,128 +1156,161 @@ func (m Model) fetchPostDetails(postID string) tea.Cmd {
 	}
 }
 
-// renderClipboardPanel renders the right-side clipboard panel
-func (m Model) renderClipboardPanel(height int, topPadding int) string {
-	var b strings.Builder
+// ---- Chrome -------------------------------------------------------------
 
-	// Add top padding to align with main content
-	for i := 0; i < topPadding; i++ {
-		b.WriteString("\n")
+// mainWidth is the width of the left frame. The clipboard frame takes the
+// rest when the terminal is wide enough to hold both.
+func (m Model) mainWidth() int {
+	if m.width >= wideLayout {
+		return m.width - clipboardPanelWidth - 1
 	}
+	return m.width
+}
 
-	b.WriteString(clipboardTitleStyle.Render("📋 Clipboard"))
-	b.WriteString(fmt.Sprintf(" (%d)", len(m.clipboardLinks)))
-	b.WriteString("\n")
+func (m Model) renderFooter() string {
+	return footerStyle.Width(m.width).Render(m.help.View(m.currentKeys()))
+}
 
-	if len(m.clipboardLinks) == 0 {
-		b.WriteString(clipboardEmptyStyle.Render("No links collected"))
-		b.WriteString("\n")
-		b.WriteString(clipboardEmptyStyle.Render("Use 'a' in post view"))
-		b.WriteString("\n")
-		b.WriteString(clipboardEmptyStyle.Render("to add links"))
-	} else {
-		// Show links with selection
-		maxVisible := height - 6
-		if maxVisible < 3 {
-			maxVisible = 3
+// bodyHeight is what the tab bar and the footer leave for the frames.
+func (m Model) bodyHeight() int {
+	return max(m.height-lipgloss.Height(m.renderTabs())-lipgloss.Height(m.renderFooter()), frameRows+1)
+}
+
+// sizeViewport fits the details viewport inside the main frame. It runs on a
+// resize and when the footer grows or shrinks.
+func (m *Model) sizeViewport() {
+	m.viewport.Width = max(m.mainWidth()-frameCols, 10)
+	m.viewport.Height = max(m.bodyHeight()-frameRows, 1)
+}
+
+func (m Model) renderTabs() string {
+	var tabs []string
+	for i, name := range tabNames {
+		style := tabInactiveStyle
+		if tab(i) == m.tab {
+			style = tabActiveStyle
 		}
-
-		start := 0
-		if m.clipboardCursor >= maxVisible {
-			start = m.clipboardCursor - maxVisible + 1
-		}
-		end := start + maxVisible
-		if end > len(m.clipboardLinks) {
-			end = len(m.clipboardLinks)
-		}
-
-		for i := start; i < end; i++ {
-			link := m.clipboardLinks[i]
-			// Extract video ID for display
-			displayLink := link
-			if len(displayLink) > clipboardPanelWidth-8 {
-				displayLink = displayLink[:clipboardPanelWidth-11] + "..."
-			}
-
-			if i == m.clipboardCursor {
-				b.WriteString(clipboardSelectedStyle.Render(fmt.Sprintf(" %s ", displayLink)))
-			} else {
-				b.WriteString(clipboardLinkStyle.Render(fmt.Sprintf(" %s", displayLink)))
-			}
-			b.WriteString("\n")
-		}
+		tabs = append(tabs, style.Render(name))
 	}
+	bar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 
-	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("[/] nav • x del • X clear"))
-	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("c/y copy to system"))
-
-	// Add status message if present
+	// A running list shows on both tabs, so leaving the Lists tab does not
+	// hide that a run is still talking to Patreon.
+	if m.lists.running {
+		n := 0
+		if m.lists.live != nil {
+			n = len(m.lists.live.Links)
+		}
+		bar += "  " + m.spinner.View() + dimStyle.Render(fmt.Sprintf(" making a list, %d links so far", n))
+	}
 	if m.statusMessage != "" {
-		b.WriteString("\n\n")
-		if strings.HasPrefix(m.statusMessage, "✓") {
-			b.WriteString(successStyle.Render(m.statusMessage))
-		} else if strings.HasPrefix(m.statusMessage, "✗") {
-			b.WriteString(errorStyle.Render(m.statusMessage))
-		} else {
-			b.WriteString(notCachedStyle.Render(m.statusMessage))
+		switch {
+		case strings.HasPrefix(m.statusMessage, "✓"):
+			bar += "  " + successStyle.Render(m.statusMessage)
+		case strings.HasPrefix(m.statusMessage, "✗"):
+			bar += "  " + errorStyle.Render(m.statusMessage)
+		default:
+			bar += "  " + dimStyle.Render(m.statusMessage)
 		}
 	}
-
-	content := b.String()
-	return clipboardPanelStyle.Width(clipboardPanelWidth - 4).Render(content)
+	return tabBarStyle.MaxWidth(m.width).Render(bar)
 }
 
 // View renders the TUI
 func (m Model) View() string {
-	switch m.state {
-	case stateInput:
-		return m.viewInput()
-	case stateLoading:
-		return m.viewLoading()
-	case stateList:
-		return m.viewList()
-	case stateDetails:
-		return m.viewDetails()
-	case stateError:
-		return m.viewError()
-	case stateRateLimited:
-		return m.viewRateLimited()
+	top, bottom := m.renderTabs(), m.renderFooter()
+	h := m.bodyHeight()
+	w := m.mainWidth()
+
+	var main string
+	if m.tab == tabLists {
+		main = m.viewLists(w, h)
+	} else {
+		switch m.state {
+		case stateInput:
+			main = m.viewInput(w, h)
+		case stateLoading:
+			main = box(titleStyle.Render("Loading"), fmt.Sprintf("%s %s", m.spinner.View(), m.loadingMsg), w, h)
+		case stateList:
+			main = m.viewList(w, h)
+		case stateDetails:
+			main = box(titleStyle.Render("Post"), m.viewport.View(), w, h)
+		case stateError:
+			main = box(errorStyle.Render("Error"), errorStyle.Render(fmt.Sprintf("Error: %v", m.err)), w, h)
+		case stateRateLimited:
+			main = m.viewRateLimited(w, h)
+		}
 	}
-	return ""
+
+	body := main
+	if m.width >= wideLayout {
+		body = lipgloss.JoinHorizontal(lipgloss.Top, main, " ", m.viewClipboard(clipboardPanelWidth, h))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, top, body, bottom)
 }
 
-func (m Model) viewInput() string {
-	mainWidth := m.width - clipboardPanelWidth - 3
-	if mainWidth < 40 {
-		mainWidth = 40
-	}
-	var b strings.Builder
+// ---- Views --------------------------------------------------------------
 
-	b.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
+// viewClipboard renders the clipboard frame beside the main one.
+func (m Model) viewClipboard(w, h int) string {
+	title := titleStyle.Render("📋 Clipboard") + dimStyle.Render(fmt.Sprintf(" (%d)", len(m.clipboardLinks)))
+	if len(m.clipboardLinks) == 0 {
+		return box(title, dimStyle.Render("No links collected.\nPress a on a link to add it."), w, h)
+	}
+
+	inner := w - frameCols
+	maxVisible := max(h-frameRows, 1)
+	start := 0
+	if m.clipboardCursor >= maxVisible {
+		start = m.clipboardCursor - maxVisible + 1
+	}
+	end := min(start+maxVisible, len(m.clipboardLinks))
+
+	var lines []string
+	for i := start; i < end; i++ {
+		link := pad(m.clipboardLinks[i], inner)
+		if i == m.clipboardCursor {
+			lines = append(lines, clipboardSelectedStyle.Render(link))
+		} else {
+			lines = append(lines, clipboardLinkStyle.Render(link))
+		}
+	}
+	return box(title, strings.Join(lines, "\n"), w, h)
+}
+
+func (m Model) viewRateLimited(w, h int) string {
+	remaining := time.Until(m.rateLimitUntil)
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	var b strings.Builder
+	b.WriteString(errorStyle.Render(fmt.Sprintf("⏳ Rate limited by Patreon (HTTP %d)", m.rateLimitStatus)))
 	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("Retrying in %02d:%02d  (attempt %d of %d)",
+		int(remaining.Seconds())/60, int(remaining.Seconds())%60,
+		m.rateLimitAttempt, uiRateLimitMaxAttempts))
+
+	return box(errorStyle.Render("Rate limited"), b.String(), w, h)
+}
+
+func (m Model) viewInput(w, h int) string {
+	var b strings.Builder
+	title := "New campaign"
 
 	switch m.inputStep {
 	case 1: // Entering campaign ID
 		b.WriteString("Enter a new campaign ID:\n\n")
-		b.WriteString(inputStyle.Render(m.input.View()))
-		b.WriteString("\n\n")
-		if len(m.savedCampaigns) > 0 {
-			b.WriteString(helpStyle.Render("Enter to continue • Esc back to list • Ctrl+C quit"))
-		} else {
-			b.WriteString(helpStyle.Render("Enter to continue • Esc/Ctrl+C quit"))
-		}
+		b.WriteString(m.input.View())
 
 	case 2: // Entering campaign name
 		b.WriteString(fmt.Sprintf("Campaign ID: %s\n\n", m.pendingID))
 		b.WriteString("Enter a name for this campaign (optional):\n\n")
-		b.WriteString(inputStyle.Render(m.nameInput.View()))
-		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("Enter to continue • Esc back to ID entry"))
+		b.WriteString(m.nameInput.View())
 
 	case 3: // Entering date filter
 		if m.editingDateOnly {
+			title = "Date filter"
 			b.WriteString("Edit date filter:\n\n")
 		} else {
 			b.WriteString(fmt.Sprintf("Campaign ID: %s\n", m.pendingID))
@@ -1174,16 +1321,12 @@ func (m Model) viewInput() string {
 			}
 			b.WriteString("Filter posts after date (optional):\n\n")
 		}
-		b.WriteString(inputStyle.Render(m.dateInput.View()))
+		b.WriteString(m.dateInput.View())
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("Format: YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss] • Enter to " + func() string {
-			if m.editingDateOnly {
-				return "save"
-			}
-			return "fetch"
-		}() + " • Esc back"))
+		b.WriteString(dimStyle.Render("Format: YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss]"))
 
 	default: // inputStep 0: Selection mode
+		title = "Campaigns"
 		if len(m.savedCampaigns) > 0 {
 			b.WriteString("Select a campaign:\n\n")
 
@@ -1194,86 +1337,31 @@ func (m Model) viewInput() string {
 				}
 
 				if i == m.campaignCursor {
-					b.WriteString(selectedStyle.Render(fmt.Sprintf(" ▶ %s ", displayName)))
+					b.WriteString(selectedStyle.Render(fmt.Sprintf("▶ %s", displayName)))
 				} else {
-					b.WriteString(normalStyle.Render(fmt.Sprintf("   %s", displayName)))
+					b.WriteString(normalStyle.Render(fmt.Sprintf("  %s", displayName)))
 				}
 				b.WriteString("\n")
 			}
 
-			b.WriteString("\n")
 			// Show current date filter
 			if m.publishedAfter != "" {
-				b.WriteString(fmt.Sprintf("📅 Filter: posts after %s\n\n", m.publishedAfter))
+				b.WriteString(fmt.Sprintf("\n📅 Filter: posts after %s", m.publishedAfter))
 			}
-			helpText := "↑/k ↓/j nav • Enter select • n/a new • f filter • d delete • Esc quit"
-			if len(m.clipboardLinks) > 0 {
-				helpText += "\nc copy • x remove • X clear"
-			}
-			b.WriteString(helpStyle.Render(helpText))
 		} else {
 			b.WriteString("No saved campaigns.\n\n")
 			b.WriteString("Enter a campaign ID:\n\n")
-			b.WriteString(inputStyle.Render(m.input.View()))
-			b.WriteString("\n\n")
-			b.WriteString(helpStyle.Render("Enter to continue • Esc/Ctrl+C quit"))
+			b.WriteString(m.input.View())
 		}
 	}
 
-	// If we have clipboard entries, show the panel
-	if len(m.clipboardLinks) > 0 {
-		clipboardPanel := m.renderClipboardPanel(m.height, 3)
-		return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(mainWidth).Render(b.String()), "  ", clipboardPanel)
-	}
-
-	return b.String()
+	return box(titleStyle.Render(title), b.String(), w, h)
 }
 
-func (m Model) viewLoading() string {
-	mainWidth := m.width - clipboardPanelWidth - 3
-	if mainWidth < 40 {
-		mainWidth = 40
-	}
-
-	var main strings.Builder
-
-	main.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
-	main.WriteString("\n\n")
-	main.WriteString(fmt.Sprintf("%s %s", m.spinner.View(), m.loadingMsg))
-
-	// Render clipboard panel
-	clipboardPanel := m.renderClipboardPanel(m.height, 3)
-
-	// If we have clipboard entries, show the panel
-	if len(m.clipboardLinks) > 0 {
-		return lipgloss.JoinHorizontal(lipgloss.Top,
-			lipgloss.NewStyle().Width(mainWidth).Render(main.String()),
-			"  ",
-			clipboardPanel,
-		)
-	}
-	return main.String()
-}
-
-func (m Model) viewList() string {
-	mainWidth := m.width - clipboardPanelWidth - 3
-	if mainWidth < 40 {
-		mainWidth = 40
-	}
-
-	// Build main content
-	var main strings.Builder
-
-	main.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
-	main.WriteString("\n")
+func (m Model) viewList(w, h int) string {
 	// Build status with pagination info
 	pageInfo := fmt.Sprintf("Page %d", m.currentPage)
-	// Check if next page is available (considering filter)
-	canGoNext := m.hasMorePages && m.nextCursor != ""
-	if m.publishedAfter != "" && len(m.posts) < 20 {
-		canGoNext = false
-	}
-	if canGoNext {
+	if m.canGoNext() {
 		pageInfo += " →"
 	}
 	if m.currentPage > 1 {
@@ -1288,36 +1376,29 @@ func (m Model) viewList() string {
 	if m.campaignName != "" {
 		campaignDisplay = fmt.Sprintf("%s (%s)", m.campaignName, m.campaignID)
 	}
-	main.WriteString(statusBarStyle.Render(fmt.Sprintf("%s • %s", campaignDisplay, pageInfo)))
-	main.WriteString("\n\n")
+	title := titleStyle.Render("Posts") + dimStyle.Render(fmt.Sprintf(" %s • %s", campaignDisplay, pageInfo))
 
-	// Header with cache column - adjust widths for narrower main panel
-	titleWidth := mainWidth - 45
-	if titleWidth < 15 {
-		titleWidth = 15
-	}
-	header := fmt.Sprintf("%-3s │ %-12s │ %-*s │ %-6s", "💾", "POST TYPE", titleWidth, "TITLE", "ACCESS")
+	var main strings.Builder
+
+	// Columns: cache mark, post type, title, access. The row styles add a
+	// column of padding each side, and each " │ " separator takes three.
+	inner := w - frameCols
+	titleWidth := max(inner-2-2-12-6-3*3, 15)
+	// The leading space stands in for the row styles' left padding.
+	header := " " + pad("💾", 2) + " │ " + pad("POST TYPE", 12) + " │ " + pad("TITLE", titleWidth) + " │ " + "ACCESS"
 	main.WriteString(headerStyle.Render(header))
 	main.WriteString("\n")
 
-	// Calculate visible posts based on height
-	visiblePosts := m.height - 12
-	if visiblePosts < 5 {
-		visiblePosts = 5
-	}
-	if visiblePosts > len(m.posts) {
-		visiblePosts = len(m.posts)
-	}
+	// Rows left after the header (2 lines) and the selected post block (5).
+	visiblePosts := max(h-frameRows-2-5, 1)
+	visiblePosts = min(visiblePosts, len(m.posts))
 
 	// Scrolling logic
 	start := 0
 	if m.cursor >= visiblePosts {
 		start = m.cursor - visiblePosts + 1
 	}
-	end := start + visiblePosts
-	if end > len(m.posts) {
-		end = len(m.posts)
-	}
+	end := min(start+visiblePosts, len(m.posts))
 
 	for i := start; i < end; i++ {
 		post := m.posts[i]
@@ -1330,12 +1411,6 @@ func (m Model) viewList() string {
 			cacheIndicator = notCachedStyle.Render("·")
 		}
 
-		// Truncate title if too long
-		title := post.Title
-		if len(title) > titleWidth {
-			title = title[:titleWidth-3] + "..."
-		}
-
 		// Format access status
 		var access string
 		if post.CurrentUserCanView {
@@ -1344,18 +1419,8 @@ func (m Model) viewList() string {
 			access = cannotViewStyle.Render("✗ No")
 		}
 
-		postType := post.PostType
-		if len(postType) > 12 {
-			postType = postType[:9] + "..."
-		}
-
-		line := fmt.Sprintf("%-3s │ %-12s │ %-*s │ %s",
-			cacheIndicator,
-			typeStyle.Render(postType),
-			titleWidth,
-			title,
-			access,
-		)
+		line := pad(cacheIndicator, 2) + " │ " + pad(typeStyle.Render(post.PostType), 12) + " │ " +
+			pad(post.Title, titleWidth) + " │ " + access
 
 		if i == m.cursor {
 			main.WriteString(selectedStyle.Render(line))
@@ -1372,49 +1437,11 @@ func (m Model) viewList() string {
 		main.WriteString(headerStyle.Render("Selected Post"))
 		main.WriteString("\n")
 		urlText := "https://www.patreon.com" + selected.PatreonURL
-		if len(urlText) > mainWidth-8 {
-			urlText = urlText[:mainWidth-11] + "..."
-		}
 		main.WriteString(fmt.Sprintf("  URL: %s\n", urlStyle.Render(urlText)))
-		main.WriteString(fmt.Sprintf("  Published: %s\n", selected.PublishedAt.Format("2006-01-02 15:04")))
+		main.WriteString(fmt.Sprintf("  Published: %s", selected.PublishedAt.Format("2006-01-02 15:04")))
 	}
 
-	main.WriteString(helpStyle.Render("↑/k ↓/j nav • Enter view • n/→ p/← pages • r/R refresh • c copy • q quit"))
-
-	// Render clipboard panel
-	clipboardPanel := m.renderClipboardPanel(m.height, 3)
-
-	// Join main and clipboard panel side by side
-	return lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(mainWidth).Render(main.String()),
-		"  ",
-		clipboardPanel,
-	)
-}
-
-func (m Model) viewDetails() string {
-	mainWidth := m.width - clipboardPanelWidth - 3
-	if mainWidth < 40 {
-		mainWidth = 40
-	}
-
-	var main strings.Builder
-
-	main.WriteString(titleStyle.Render("🎨 Post Details"))
-	main.WriteString("\n\n")
-	main.WriteString(m.viewport.View())
-	main.WriteString("\n")
-	main.WriteString(helpStyle.Render("↑/k ↓/j nav links • a add • A add all • c copy • esc back • q quit"))
-
-	// Render clipboard panel (2 lines padding to align with title)
-	clipboardPanel := m.renderClipboardPanel(m.height, 3)
-
-	// Join main and clipboard panel side by side
-	return lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(mainWidth).Render(main.String()),
-		"  ",
-		clipboardPanel,
-	)
+	return box(title, main.String(), w, h)
 }
 
 func (m Model) renderDetailsContent() string {
@@ -1475,18 +1502,6 @@ func (m Model) renderDetailsContent() string {
 		b.WriteString(notCachedStyle.Render("  No description available"))
 	}
 	b.WriteString("\n")
-
-	return b.String()
-}
-
-func (m Model) viewError() string {
-	var b strings.Builder
-
-	b.WriteString(titleStyle.Render("🎨 Patreon Posts Viewer"))
-	b.WriteString("\n\n")
-	b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-	b.WriteString("\n\n")
-	b.WriteString(helpStyle.Render("r retry • esc back • q quit"))
 
 	return b.String()
 }

@@ -24,10 +24,40 @@ var (
 	delayLineWidth  int
 )
 
+// Reporter receives an extraction's progress. The CLI prints it. The TUI shows
+// it inside the list the run is filling. Every field is optional.
+type Reporter struct {
+	Log    func(text string)               // log output, newlines included
+	Status func(line string)               // a line that replaces the last one, such as a countdown
+	Start  func(run db.LinkRun)            // the run now exists in the database
+	Link   func(runID int64, l db.RunLink) // the run found a new link
+}
+
+// Terminal reports to stdout. On a terminal it redraws the countdown in place.
+// On a pipe it leaves Status unset, so a countdown prints one plain line.
+func Terminal() Reporter {
+	r := Reporter{Log: func(text string) {
+		clearDelayLine()
+		fmt.Print(text)
+	}}
+	if isTTY() {
+		r.Status = writeDelayLine
+	}
+	return r
+}
+
+func (r Reporter) logf(format string, args ...any) {
+	if r.Log != nil {
+		r.Log(fmt.Sprintf(format, args...))
+	}
+}
+
 // ExtractYouTubeLinks goes through all campaigns, fetches posts after the given
-// date, extracts YouTube links and prints them to the terminal.
+// date, extracts YouTube links and reports them. Each link is saved to the
+// database as it is found, grouped under a run that starts now, so a run that
+// is killed part way still leaves its links behind.
 // If forceRefresh is true, post details will be re-fetched even if cached.
-func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate string, forceRefresh bool) error {
+func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate string, forceRefresh bool, r Reporter) error {
 	if len(cfg.Campaigns) == 0 {
 		return fmt.Errorf("no campaigns configured in config file")
 	}
@@ -46,22 +76,44 @@ func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate st
 			return fmt.Errorf("no previous run found that used --extract-links; run once with --extract-links to initialize")
 		}
 		filterDate = lastRun.RunAt
-		logf("[extract] filtering posts after last extract-links run: %s\n", datetime.FormatLocal(filterDate))
+		r.logf("[extract] filtering posts after last extract-links run: %s\n", datetime.FormatLocal(filterDate))
 	} else if afterTrim != "" {
 		parsed, err := datetime.ParseLocal(afterTrim)
 		if err != nil {
 			return fmt.Errorf("invalid date/time '%s': %w", afterDate, err)
 		}
 		filterDate = parsed
-		logf("[extract] filtering posts after: %s\n", datetime.FormatLocal(filterDate))
+		r.logf("[extract] filtering posts after: %s\n", datetime.FormatLocal(filterDate))
 	}
+
+	after := ""
+	if !filterDate.IsZero() {
+		after = datetime.FormatLocal(filterDate)
+	}
+	run := db.LinkRun{StartedAt: time.Now(), After: after}
+	runID, err := database.StartLinkRun(run.StartedAt, after)
+	if err != nil {
+		return err
+	}
+	run.ID = runID
+	if r.Start != nil {
+		r.Start(run)
+	}
+	// failures names each campaign that did not finish, so the saved list
+	// says it may be short.
+	var failures []string
+	defer func() {
+		if err := database.FinishLinkRun(runID, time.Now(), strings.Join(failures, "; ")); err != nil {
+			r.logf("[extract] warning: failed to mark run finished: %v\n", err)
+		}
+	}()
 
 	client := api.NewClient(cfg.Cookies)
 	minDelayMs := cfg.GetRequestDelayMinMs()
 	maxDelayMs := cfg.GetRequestDelayMaxMs()
 
-	logf("[extract] request delays: %dms - %dms\n", minDelayMs, maxDelayMs)
-	logf("[extract] processing %d campaign(s)\n\n", len(cfg.Campaigns))
+	r.logf("[extract] request delays: %dms - %dms\n", minDelayMs, maxDelayMs)
+	r.logf("[extract] processing %d campaign(s)\n\n", len(cfg.Campaigns))
 
 	var allLinks []string
 	seenLinks := make(map[string]bool)
@@ -71,46 +123,57 @@ func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate st
 		if campaignName == "" {
 			campaignName = campaign.ID
 		}
-		logf("[campaign %d/%d] %s (%s)\n", i+1, len(cfg.Campaigns), campaignName, campaign.ID)
+		r.logf("[campaign %d/%d] %s (%s)\n", i+1, len(cfg.Campaigns), campaignName, campaign.ID)
 
-		links, err := extractLinksFromCampaign(client, database, campaign.ID, filterDate, minDelayMs, maxDelayMs, forceRefresh)
+		found := func(post models.Post, links []string) {
+			for _, link := range dedupe(links, seenLinks) {
+				l := db.RunLink{URL: link, CampaignID: campaign.ID, PostID: post.ID, PostTitle: post.Title, PublishedAt: post.PublishedAt}
+				if err := database.AddRunLink(runID, len(allLinks), l); err != nil {
+					r.logf("    [extract] warning: failed to save %s: %v\n", link, err)
+				}
+				allLinks = append(allLinks, link)
+				if r.Link != nil {
+					r.Link(runID, l)
+				}
+			}
+		}
+
+		links, err := extractLinksFromCampaign(client, database, campaign.ID, filterDate, minDelayMs, maxDelayMs, forceRefresh, r, found)
 		if err != nil {
-			logf("[campaign %s] error: %v\n", campaign.ID, err)
+			r.logf("[campaign %s] error: %v\n", campaign.ID, err)
+			failures = append(failures, fmt.Sprintf("%s: %v", campaignName, err))
 
 			// One campaign failing on its own is survivable, but a rate limit or
 			// a dead session applies to every campaign. Carrying on would just
 			// repeat the same failure three more times.
 			var rl *api.RateLimitError
 			if errors.As(err, &rl) || errors.Is(err, api.ErrAuthRequired) {
-				logf("[extract] stopping: the remaining campaigns would hit the same error\n")
-				allLinks = append(allLinks, dedupe(links, seenLinks)...)
+				r.logf("[extract] stopping: the remaining campaigns would hit the same error\n")
 				break
 			}
 			continue
 		}
 
-		allLinks = append(allLinks, dedupe(links, seenLinks)...)
-
-		logf("[campaign %s] found %d unique YouTube link(s)\n\n", campaign.ID, len(links))
+		r.logf("[campaign %s] found %d unique YouTube link(s)\n\n", campaign.ID, len(links))
 
 		// Random delay between campaigns
 		if i < len(cfg.Campaigns)-1 {
-			randomDelay(minDelayMs, maxDelayMs, "between campaigns")
+			r.randomDelay(minDelayMs, maxDelayMs, "between campaigns")
 		}
 	}
 
 	if len(allLinks) == 0 {
-		logln("[summary] no YouTube links found")
+		r.logf("[summary] no YouTube links found\n")
 		return nil
 	}
 
 	// Print links
-	logf("\n[summary] YouTube Links (%d total):\n", len(allLinks))
-	logln(strings.Repeat("-", 60))
+	r.logf("\n[summary] YouTube Links (%d total):\n", len(allLinks))
+	r.logf("%s\n", strings.Repeat("-", 60))
 	for _, link := range allLinks {
-		logln(link)
+		r.logf("%s\n", link)
 	}
-	logln(strings.Repeat("-", 60))
+	r.logf("%s\n", strings.Repeat("-", 60))
 
 	return nil
 }
@@ -127,7 +190,8 @@ func dedupe(links []string, seen map[string]bool) []string {
 	return out
 }
 
-// extractLinksFromCampaign fetches all posts for a campaign and extracts YouTube links
+// extractLinksFromCampaign fetches all posts for a campaign and extracts YouTube
+// links. It hands each post's links to found as soon as it has them.
 func extractLinksFromCampaign(
 	client *api.Client,
 	database *db.Database,
@@ -135,6 +199,8 @@ func extractLinksFromCampaign(
 	filterDate time.Time,
 	minDelayMs, maxDelayMs int,
 	forceRefresh bool,
+	r Reporter,
+	found func(post models.Post, links []string),
 ) ([]string, error) {
 	var allLinks []string
 	cursor := ""
@@ -147,18 +213,18 @@ func extractLinksFromCampaign(
 
 	for {
 		pageCount++
-		logf("  [page %d] fetching posts\n", pageCount)
+		r.logf("  [page %d] fetching posts\n", pageCount)
 
-		page, err := withRateLimitRetry(fmt.Sprintf("page %d", pageCount), func() (*models.PostsPage, error) {
+		page, err := withRateLimitRetry(r, fmt.Sprintf("page %d", pageCount), func() (*models.PostsPage, error) {
 			return client.FetchPosts(campaignID, 50, cursor)
 		})
 		if err != nil {
 			return allLinks, fmt.Errorf("failed to fetch posts: %w", err)
 		}
-		logf("  [page %d] received %d post(s)\n", pageCount, len(page.Posts))
+		r.logf("  [page %d] received %d post(s)\n", pageCount, len(page.Posts))
 
 		// Random delay after fetching page
-		randomDelay(minDelayMs, maxDelayMs, "after page fetch")
+		r.randomDelay(minDelayMs, maxDelayMs, "after page fetch")
 
 		// Process posts
 		for i, post := range page.Posts {
@@ -166,8 +232,8 @@ func extractLinksFromCampaign(
 			if !filterDate.IsZero() && post.PublishedAt.Before(filterDate) {
 				// Since posts are sorted by date descending, we can stop early
 				postsSkippedByDate++
-				logf("  [page %d] reached post older than filter date; stopping early\n", pageCount)
-				logf("  [summary] pages=%d processed=%d cache=%d fetched=%d failed=%d skippedByDate=%d links=%d\n",
+				r.logf("  [page %d] reached post older than filter date; stopping early\n", pageCount)
+				r.logf("  [summary] pages=%d processed=%d cache=%d fetched=%d failed=%d skippedByDate=%d links=%d\n",
 					pageCount,
 					postsProcessed,
 					postsFromCache,
@@ -180,7 +246,7 @@ func extractLinksFromCampaign(
 			}
 
 			postsProcessed++
-			logf(
+			r.logf(
 				"    [post %d] id=%s published=%s type=%s title=\"%s\"\n",
 				postsProcessed,
 				post.ID,
@@ -199,39 +265,40 @@ func extractLinksFromCampaign(
 						var links []string
 						if err := json.Unmarshal([]byte(cached.YouTubeLinks), &links); err == nil {
 							allLinks = append(allLinks, links...)
+							found(post, links)
 							cachedCount = len(links)
 						}
 					}
 					postsFromCache++
-					logf("    [post %d] source=cache links=%d\n", postsProcessed, cachedCount)
+					r.logf("    [post %d] source=cache links=%d\n", postsProcessed, cachedCount)
 					if i < len(page.Posts)-1 {
-						randomDelay(minDelayMs, maxDelayMs, "between post processing")
+						r.randomDelay(minDelayMs, maxDelayMs, "between post processing")
 					}
 					continue
 				}
 			}
 
 			// Fetch post details from API
-			logf("    [post %d] source=api fetching details\n", postsProcessed)
-			details, err := withRateLimitRetry("post "+post.ID, func() (*models.PostDetails, error) {
+			r.logf("    [post %d] source=api fetching details\n", postsProcessed)
+			details, err := withRateLimitRetry(r, "post "+post.ID, func() (*models.PostDetails, error) {
 				return client.FetchPostDetails(post.ID)
 			})
 			if err != nil {
 				// If authentication issue, return early so caller can handle it
 				if errors.Is(err, api.ErrAuthRequired) {
-					logf("    [post %d] auth error\n", postsProcessed)
+					r.logf("    [post %d] auth error\n", postsProcessed)
 					return allLinks, fmt.Errorf("authentication error while fetching post %s: %w", post.ID, err)
 				}
 				// A rate limit that outlived the retry loop means backing off
 				// further is pointless; keeping on would only make it worse.
 				var rl *api.RateLimitError
 				if errors.As(err, &rl) {
-					logf("    [post %d] still rate limited, stopping campaign\n", postsProcessed)
+					r.logf("    [post %d] still rate limited, stopping campaign\n", postsProcessed)
 					return allLinks, err
 				}
 				postsFailed++
-				logf("    [post %d] fetch failed: %v\n", postsProcessed, err)
-				randomDelay(minDelayMs, maxDelayMs, "after post fetch failure")
+				r.logf("    [post %d] fetch failed: %v\n", postsProcessed, err)
+				r.randomDelay(minDelayMs, maxDelayMs, "after post fetch failure")
 				continue
 			}
 
@@ -240,16 +307,17 @@ func extractLinksFromCampaign(
 			database.SavePostDetails(post.ID, details.Description, string(linksJSON))
 
 			allLinks = append(allLinks, details.YouTubeLinks...)
+			found(post, details.YouTubeLinks)
 			postsFetched++
-			logf("    [post %d] source=api fetched links=%d\n", postsProcessed, len(details.YouTubeLinks))
+			r.logf("    [post %d] source=api fetched links=%d\n", postsProcessed, len(details.YouTubeLinks))
 
 			// Random delay after each post detail fetch
 			if i < len(page.Posts)-1 {
-				randomDelay(minDelayMs, maxDelayMs, "between post processing")
+				r.randomDelay(minDelayMs, maxDelayMs, "between post processing")
 			}
 		}
 
-		logf("  [page %d] done: processed=%d totalLinks=%d\n", pageCount, postsProcessed, len(allLinks))
+		r.logf("  [page %d] done: processed=%d totalLinks=%d\n", pageCount, postsProcessed, len(allLinks))
 
 		// Check if there are more pages
 		if !page.HasMore || page.NextCursor == "" {
@@ -258,7 +326,7 @@ func extractLinksFromCampaign(
 		cursor = page.NextCursor
 	}
 
-	logf("  [summary] pages=%d processed=%d cache=%d fetched=%d failed=%d skippedByDate=%d links=%d\n",
+	r.logf("  [summary] pages=%d processed=%d cache=%d fetched=%d failed=%d skippedByDate=%d links=%d\n",
 		pageCount,
 		postsProcessed,
 		postsFromCache,
@@ -272,30 +340,30 @@ func extractLinksFromCampaign(
 }
 
 // randomDelay sleeps for a random duration between min and max milliseconds
-func randomDelay(minMs, maxMs int, label string) {
+func (r Reporter) randomDelay(minMs, maxMs int, label string) {
 	delay := chooseDelayMs(minMs, maxMs)
 	if delay <= 0 {
 		return
 	}
-	countdown("[delay] "+label, time.Duration(delay)*time.Millisecond)
+	r.countdown("[delay] "+label, time.Duration(delay)*time.Millisecond)
 }
 
-// countdown waits for the given duration, redrawing a single line each second on
-// a terminal and printing one static line when the output is redirected.
-func countdown(prefix string, total time.Duration) {
+// countdown waits for the given duration, redrawing the status line each
+// second, or logging one static line when the reporter has no status line.
+func (r Reporter) countdown(prefix string, total time.Duration) {
 	if total <= 0 {
 		return
 	}
 
-	if !isTTY() {
-		logf("%s %s/%s\n", prefix, formatDuration(total), formatDuration(total))
+	if r.Status == nil {
+		r.logf("%s %s/%s\n", prefix, formatDuration(total), formatDuration(total))
 		time.Sleep(total)
 		return
 	}
 
 	remaining := total
 	for remaining > 0 {
-		writeDelayLine(fmt.Sprintf("%s %s/%s", prefix, formatDuration(remaining), formatDuration(total)))
+		r.Status(fmt.Sprintf("%s %s/%s", prefix, formatDuration(remaining), formatDuration(total)))
 
 		step := time.Second
 		if remaining < step {
@@ -304,7 +372,7 @@ func countdown(prefix string, total time.Duration) {
 		time.Sleep(step)
 		remaining -= step
 	}
-	writeDelayLine(fmt.Sprintf("%s %s/%s", prefix, formatDuration(0), formatDuration(total)))
+	r.Status(fmt.Sprintf("%s %s/%s", prefix, formatDuration(0), formatDuration(total)))
 }
 
 // Rate limit policy. These are deliberately fixed: they are a backoff ceiling,
@@ -318,7 +386,7 @@ const (
 // withRateLimitRetry runs fn, waiting and retrying while Patreon reports a rate
 // limit. It honours Retry-After when given and backs off linearly when not. It
 // gives up rather than waiting when the server asks for longer than the cap.
-func withRateLimitRetry[T any](label string, fn func() (T, error)) (T, error) {
+func withRateLimitRetry[T any](r Reporter, label string, fn func() (T, error)) (T, error) {
 	var zero T
 	for attempt := 1; ; attempt++ {
 		result, err := fn()
@@ -345,9 +413,9 @@ func withRateLimitRetry[T any](label string, fn func() (T, error)) (T, error) {
 		if rl.RetryAfter <= 0 {
 			source = "backoff"
 		}
-		logf("[rate-limit] %s: HTTP %d, waiting %s (%s), attempt %d/%d\n",
+		r.logf("[rate-limit] %s: HTTP %d, waiting %s (%s), attempt %d/%d\n",
 			label, rl.StatusCode, formatDuration(wait), source, attempt+1, rateLimitMaxAttempts)
-		countdown(fmt.Sprintf("[rate-limit] %s resuming in", label), wait)
+		r.countdown(fmt.Sprintf("[rate-limit] %s resuming in", label), wait)
 	}
 }
 
@@ -384,16 +452,6 @@ func clearDelayLine() {
 	fmt.Printf("\r%s\r", strings.Repeat(" ", delayLineWidth))
 	delayLineActive = false
 	delayLineWidth = 0
-}
-
-func logf(format string, args ...any) {
-	clearDelayLine()
-	fmt.Printf(format, args...)
-}
-
-func logln(args ...any) {
-	clearDelayLine()
-	fmt.Println(args...)
 }
 
 func formatDuration(d time.Duration) string {

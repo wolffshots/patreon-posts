@@ -12,7 +12,7 @@ func TestWithRateLimitRetryPassesThroughOtherErrors(t *testing.T) {
 	boom := errors.New("network is down")
 	calls := 0
 
-	_, err := withRateLimitRetry("t", func() (int, error) {
+	_, err := withRateLimitRetry(Reporter{}, "t", func() (int, error) {
 		calls++
 		return 0, boom
 	})
@@ -30,7 +30,7 @@ func TestWithRateLimitRetryAbortsOverCap(t *testing.T) {
 
 	// Waiting an hour is worse than failing, so this must not sleep at all.
 	start := time.Now()
-	_, err := withRateLimitRetry("t", func() (int, error) {
+	_, err := withRateLimitRetry(Reporter{}, "t", func() (int, error) {
 		calls++
 		return 0, &api.RateLimitError{StatusCode: 429, RetryAfter: time.Hour}
 	})
@@ -50,7 +50,7 @@ func TestWithRateLimitRetryHonoursRetryAfter(t *testing.T) {
 	calls := 0
 
 	start := time.Now()
-	got, err := withRateLimitRetry("t", func() (int, error) {
+	got, err := withRateLimitRetry(Reporter{}, "t", func() (int, error) {
 		calls++
 		if calls == 1 {
 			return 0, &api.RateLimitError{StatusCode: 429, RetryAfter: time.Second}

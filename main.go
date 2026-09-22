@@ -148,7 +148,7 @@ func main() {
 
 	// Handle extract-links mode
 	if *extractLinks {
-		if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter, *forceRefresh); err != nil {
+		if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter, *forceRefresh, cli.Terminal()); err != nil {
 			fmt.Fprintf(os.Stderr, "Error extracting links: %v\n", err)
 			os.Exit(1)
 		}
@@ -159,7 +159,7 @@ func main() {
 	}
 
 	// Create and run the TUI
-	model := ui.NewModel(cfg.Cookies, database, publishedAfter)
+	model := ui.NewModel(cfg, database, publishedAfter)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
