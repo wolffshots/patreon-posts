@@ -57,6 +57,13 @@ func Open(path string) (*Database, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// One connection serialises every statement. The TUI writes from an
+	// extraction goroutine while the update loop writes the post cache, and two
+	// connections would race for SQLite's write lock and fail with "database is
+	// locked". No caller nests a query inside an open rows loop, which is the
+	// one thing a single connection cannot do.
+	db.SetMaxOpenConns(1)
+
 	d := &Database{db: db}
 	if err := d.migrate(); err != nil {
 		db.Close()
@@ -118,6 +125,26 @@ func (d *Database) migrate() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		run_at TEXT NOT NULL,
 		run_flags TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS link_runs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		started_at TEXT NOT NULL,
+		after TEXT NOT NULL,
+		finished_at TEXT,
+		error TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE TABLE IF NOT EXISTS run_links (
+		run_id INTEGER NOT NULL,
+		position INTEGER NOT NULL,
+		link TEXT NOT NULL,
+		campaign_id TEXT NOT NULL,
+		post_id TEXT NOT NULL,
+		post_title TEXT NOT NULL,
+		published_at TEXT NOT NULL,
+		PRIMARY KEY (run_id, position),
+		FOREIGN KEY (run_id) REFERENCES link_runs(id)
 	);
 	`
 
@@ -225,6 +252,108 @@ func (d *Database) GetLastRun() (*LastRunInfo, error) {
 	}
 
 	return &LastRunInfo{RunAt: runAt, Flags: flags}, nil
+}
+
+// LinkRun is one pass of link extraction and the links it found, in the order
+// it printed them.
+type LinkRun struct {
+	ID         int64
+	StartedAt  time.Time
+	After      string    // the filter the run used, empty for none
+	FinishedAt time.Time // zero while the run is going, or when it died
+	Error      string
+	Links      []RunLink
+}
+
+// RunLink is one link a run found, with the post it came from.
+type RunLink struct {
+	URL         string
+	CampaignID  string
+	PostID      string
+	PostTitle   string
+	PublishedAt time.Time
+}
+
+// StartLinkRun records a run before it finds anything, so the links it saves
+// as it goes survive the run being killed.
+func (d *Database) StartLinkRun(startedAt time.Time, after string) (int64, error) {
+	res, err := d.db.Exec(`INSERT INTO link_runs (started_at, after) VALUES (?, ?)`,
+		datetime.FormatLocal(startedAt), after)
+	if err != nil {
+		return 0, fmt.Errorf("failed to record link run: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// AddRunLink stores the link at position in a run's list.
+func (d *Database) AddRunLink(runID int64, position int, l RunLink) error {
+	_, err := d.db.Exec(`
+		INSERT INTO run_links (run_id, position, link, campaign_id, post_id, post_title, published_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, runID, position, l.URL, l.CampaignID, l.PostID, l.PostTitle, datetime.FormatLocal(l.PublishedAt))
+	return err
+}
+
+// FinishLinkRun marks a run as over. runErr is what cut it short, if anything.
+func (d *Database) FinishLinkRun(runID int64, finishedAt time.Time, runErr string) error {
+	_, err := d.db.Exec(`UPDATE link_runs SET finished_at = ?, error = ? WHERE id = ?`,
+		datetime.FormatLocal(finishedAt), runErr, runID)
+	return err
+}
+
+// ListLinkRuns returns every run with its links, newest run first.
+func (d *Database) ListLinkRuns() ([]LinkRun, error) {
+	rows, err := d.db.Query(`
+		SELECT id, started_at, after, COALESCE(finished_at, ''), error
+		FROM link_runs ORDER BY started_at DESC, id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	var runs []LinkRun
+	index := map[int64]int{}
+	for rows.Next() {
+		var r LinkRun
+		var started, finished string
+		if err := rows.Scan(&r.ID, &started, &r.After, &finished, &r.Error); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		r.StartedAt, _ = datetime.ParseLocal(started)
+		if finished != "" {
+			r.FinishedAt, _ = datetime.ParseLocal(finished)
+		}
+		index[r.ID] = len(runs)
+		runs = append(runs, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// A second query rather than one per run, and after the first has closed,
+	// because the pool holds a single connection.
+	rows, err = d.db.Query(`
+		SELECT run_id, link, campaign_id, post_id, post_title, published_at
+		FROM run_links ORDER BY run_id, position
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var l RunLink
+		var published string
+		if err := rows.Scan(&id, &l.URL, &l.CampaignID, &l.PostID, &l.PostTitle, &published); err != nil {
+			return nil, err
+		}
+		l.PublishedAt, _ = datetime.ParseLocal(published)
+		if i, ok := index[id]; ok {
+			runs[i].Links = append(runs[i].Links, l)
+		}
+	}
+	return runs, rows.Err()
 }
 
 // SaveCampaign saves or updates a campaign

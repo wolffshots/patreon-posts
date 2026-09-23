@@ -18,6 +18,7 @@ A terminal UI application to browse Patreon posts for campaigns you're subscribe
 - Cache status indicators show which posts have been fetched and cached
 - Force refresh option to bypass cache (global `-R` or per-post `R`)
 - **Batch extraction mode** (`--extract-links`) — non-interactive CLI that iterates all configured campaigns, extracts YouTube links, and prints them to stdout
+- **Saved link lists** — every extraction run saves its links to the database under the run's start time. The TUI's Lists tab shows them and can start a new run
 
 ## Installation
 
@@ -57,6 +58,8 @@ During extraction, the CLI now provides detailed runtime progress:
 - In-place delay countdown in a static line using `remaining/total` format (for example `00:03/00:05`)
 
 When output is redirected to a file or pipe, delay updates fall back to regular log lines (no carriage-return animation).
+
+Each run saves its links to the database as it finds them, grouped under the time the run started. If you close the terminal before you copy the list, open the TUI's Lists tab (`2`) to get it back. A run that is killed part way keeps the links it found and shows as `interrupted`.
 
 ```bash
 # Extract links from all configured campaigns
@@ -171,6 +174,15 @@ Prefer `cookie_source` above, which does this for you. To copy them by hand:
 
 ## Controls
 
+The TUI has two tabs. The footer lists the keys for the screen on show.
+
+| Key | Action |
+|-----|--------|
+| `1` | Posts tab |
+| `2` | Lists tab |
+| `?` | Show all keys |
+| `q` / `Ctrl+C` | Quit (`Ctrl+C` only while typing in a text box) |
+
 ### Campaign Selection
 
 When you start the app, you'll see a list of saved campaigns (if any):
@@ -230,6 +242,22 @@ The detail view shows:
 | `R` | Force refresh this post's details (bypass cache) |
 | `Esc` / `Backspace` | Back to posts list |
 | `q` | Quit |
+
+### Lists
+
+The Lists tab shows every link extraction run, newest first. Each run is a group headed by its start time and the date filter it used. The group holds the links it found, with the title of the post each came from.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move up |
+| `↓` / `j` | Move down |
+| `Enter` / `Space` | Expand or collapse the group |
+| `a` | Add the selected link to the clipboard. On a group row, add all of its links |
+| `n` | Make a new list. This does the same as `--extract-links --after last`. The run log shows inside the new group while it runs |
+| `c` / `y` | Copy clipboard links to system clipboard |
+| `x` / `X` / `[` / `]` | Clipboard controls, as elsewhere |
+
+A new list records itself as an `--extract-links` run, so the next `--after last` starts from it, whether you run that from the CLI or from the TUI. You can switch tabs while a list runs. The tab bar shows its progress.
 
 ## Clipboard Panel
 
