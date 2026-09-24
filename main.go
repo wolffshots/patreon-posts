@@ -17,6 +17,9 @@ import (
 	"patreon-posts/internal/ui"
 )
 
+// version is overridden at release build time via -ldflags "-X main.version=…".
+var version = "dev"
+
 func main() {
 	// Parse command line flags
 	cookiesFlag := flag.String("cookies", "", "Patreon session cookies (or set via config file)")
@@ -25,7 +28,13 @@ func main() {
 	afterFlag := flag.String("after", "", "Only show posts published after this date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss]) or 'last'")
 	extractLinks := flag.Bool("extract-links", false, "Extract YouTube links from all campaigns and print them")
 	forceRefresh := flag.Bool("force-refresh", false, "Force refresh post details when running --extract-links")
+	showVersion := flag.Bool("version", false, "Print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("patreon-posts", version)
+		return
+	}
 
 	runFlags := collectRunFlags()
 
