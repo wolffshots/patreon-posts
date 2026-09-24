@@ -22,9 +22,32 @@ A terminal UI application to browse Patreon posts for campaigns you're subscribe
 
 ## Installation
 
+### Windows (Scoop)
+
+```powershell
+scoop bucket add wolffshots https://github.com/wolffshots/scoop-bucket
+scoop install wolffshots/patreon-posts
+```
+
+Upgrade with `scoop update patreon-posts`.
+
+### Prebuilt binaries
+
+Each [release](https://github.com/wolffshots/patreon-posts/releases) has
+binaries for Windows (x64, ARM64), Linux (x64, ARM64) and macOS (Apple Silicon),
+with their SHA-256 hashes in `checksums.txt`.
+
+### From source
+
 ```bash
 go build -o patreon-posts .
 ```
+
+### Releasing
+
+Push a `v*` tag (for example `v0.1.0`). The release workflow runs the tests,
+builds the binaries and publishes a GitHub release. The Scoop bucket checks for
+new releases every 4 hours and updates its manifest from `checksums.txt`.
 
 ## Usage
 
@@ -85,6 +108,7 @@ Each run saves its links to the database as it finds them, grouped under the tim
 | `--after` | `""` | Filter posts to those published after this date (`YYYY-MM-DD`, `YYYY-MM-DD HH:mm[:ss]`, or `last`) |
 | `--extract-links` | `false` | Run in batch extraction mode instead of TUI |
 | `--force-refresh` | `false` | Re-fetch post details even if already cached (used with `--extract-links`) |
+| `--version` | `false` | Print the version and exit |
 
 ### Configuration
 
@@ -157,6 +181,9 @@ the same limit.
 
 - **Config file**: `~/.patreon-posts.json` — Stores cookies, campaign seeds, and request delay settings
 - **Database**: `~/.patreon-posts.db` — SQLite cache for posts, pages, details, saved campaigns, and run history
+
+On Windows, `~` is your user profile folder (`%USERPROFILE%`, for example
+`C:\Users\you\.patreon-posts.json`).
 
 ### Getting Your Cookies
 
