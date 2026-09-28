@@ -2,10 +2,13 @@ package cli
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"patreon-posts/internal/api"
+	"patreon-posts/internal/config"
+	"patreon-posts/internal/db"
 )
 
 func TestWithRateLimitRetryPassesThroughOtherErrors(t *testing.T) {
@@ -69,6 +72,21 @@ func TestWithRateLimitRetryHonoursRetryAfter(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < time.Second {
 		t.Errorf("returned after %s; Retry-After was not respected", elapsed)
+	}
+}
+
+func TestExtractFailsWhenACampaignFails(t *testing.T) {
+	// Nothing listens on port 1, so the first page fetch fails at once.
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	cfg := &config.Config{Campaigns: []config.Campaign{{ID: "1"}}}
+	if err := ExtractYouTubeLinks(cfg, database, "", false, Reporter{}); err == nil {
+		t.Fatal("got nil, want an error so the run is not recorded for --after last")
 	}
 }
 

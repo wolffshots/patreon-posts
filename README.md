@@ -98,6 +98,22 @@ Each run saves its links to the database as it finds them, grouped under the tim
 ./patreon-posts --extract-links --force-refresh
 ```
 
+If a campaign fails, for example on an expired session or a rate limit, the run exits with status 1. The run is then not recorded for `--after last`, so the next run covers the posts it missed.
+
+#### JSON output
+
+Add `--json` to run headless from another program. Stdout then holds one JSON document and every log line goes to stderr:
+
+```bash
+./patreon-posts --extract-links --json --after "2026-09-20 10:00:00" > links.json
+```
+
+```json
+{"links":[{"url":"https://www.youtube.com/watch?v=VIDEO_ID","campaign_id":"2175699","post_id":"123","post_title":"Title","published_at":"2026-09-21T18:00:00Z"}],"error":"1 campaign(s) failed: ..."}
+```
+
+`links` is always an array. `error` is present only when the run failed. The links that were found still come out, and the exit status is 1. If the run fails before extraction starts (for example, on a bad config), stdout is empty.
+
 ### All Flags
 
 | Flag | Default | Description |
@@ -108,6 +124,7 @@ Each run saves its links to the database as it finds them, grouped under the tim
 | `--after` | `""` | Filter posts to those published after this date (`YYYY-MM-DD`, `YYYY-MM-DD HH:mm[:ss]`, or `last`) |
 | `--extract-links` | `false` | Run in batch extraction mode instead of TUI |
 | `--force-refresh` | `false` | Re-fetch post details even if already cached (used with `--extract-links`) |
+| `--json` | `false` | Print the links as JSON on stdout and logs on stderr (needs `--extract-links`) |
 | `--version` | `false` | Print the version and exit |
 
 ### Configuration

@@ -103,7 +103,8 @@ type Client struct {
 // NewClient creates a new Patreon API client
 func NewClient(cookies string) *Client {
 	return &Client{
-		httpClient: &http.Client{},
+		// A timeout, so an unattended run cannot hang on a stalled connection.
+		httpClient: &http.Client{Timeout: time.Minute},
 		cookies:    cookies,
 		baseURL:    defaultBaseURL,
 	}
