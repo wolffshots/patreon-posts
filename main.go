@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -29,11 +30,23 @@ func main() {
 	extractLinks := flag.Bool("extract-links", false, "Extract YouTube links from all campaigns and print them")
 	forceRefresh := flag.Bool("force-refresh", false, "Force refresh post details when running --extract-links")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
+	jsonOut := flag.Bool("json", false, "With --extract-links, print the links as JSON on stdout and send all logs to stderr")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("patreon-posts", version)
 		return
+	}
+
+	// In JSON mode stdout carries only the JSON document. Pointing os.Stdout
+	// at stderr sends every log line there, wherever it is printed.
+	stdout := os.Stdout
+	if *jsonOut {
+		if !*extractLinks {
+			fmt.Fprintln(os.Stderr, "Error: --json needs --extract-links")
+			os.Exit(1)
+		}
+		os.Stdout = os.Stderr
 	}
 
 	runFlags := collectRunFlags()
@@ -157,7 +170,26 @@ func main() {
 
 	// Handle extract-links mode
 	if *extractLinks {
-		if err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter, *forceRefresh, cli.Terminal()); err != nil {
+		rep := cli.Terminal()
+		links := []db.RunLink{}
+		rep.Link = func(_ int64, l db.RunLink) { links = append(links, l) }
+		err := cli.ExtractYouTubeLinks(cfg, database, publishedAfter, *forceRefresh, rep)
+		if *jsonOut {
+			// The links come out even when a campaign failed, so a caller can
+			// act on them and still see the error.
+			out := struct {
+				Links []db.RunLink `json:"links"`
+				Error string       `json:"error,omitempty"`
+			}{Links: links}
+			if err != nil {
+				out.Error = err.Error()
+			}
+			if encErr := json.NewEncoder(stdout).Encode(out); encErr != nil {
+				fmt.Fprintf(os.Stderr, "Error writing JSON: %v\n", encErr)
+				os.Exit(1)
+			}
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error extracting links: %v\n", err)
 			os.Exit(1)
 		}

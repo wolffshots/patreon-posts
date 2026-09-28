@@ -267,11 +267,11 @@ type LinkRun struct {
 
 // RunLink is one link a run found, with the post it came from.
 type RunLink struct {
-	URL         string
-	CampaignID  string
-	PostID      string
-	PostTitle   string
-	PublishedAt time.Time
+	URL         string    `json:"url"`
+	CampaignID  string    `json:"campaign_id"`
+	PostID      string    `json:"post_id"`
+	PostTitle   string    `json:"post_title"`
+	PublishedAt time.Time `json:"published_at"`
 }
 
 // StartLinkRun records a run before it finds anything, so the links it saves

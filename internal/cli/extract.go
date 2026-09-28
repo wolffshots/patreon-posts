@@ -164,17 +164,20 @@ func ExtractYouTubeLinks(cfg *config.Config, database *db.Database, afterDate st
 
 	if len(allLinks) == 0 {
 		r.logf("[summary] no YouTube links found\n")
-		return nil
+	} else {
+		r.logf("\n[summary] YouTube Links (%d total):\n", len(allLinks))
+		r.logf("%s\n", strings.Repeat("-", 60))
+		for _, link := range allLinks {
+			r.logf("%s\n", link)
+		}
+		r.logf("%s\n", strings.Repeat("-", 60))
 	}
 
-	// Print links
-	r.logf("\n[summary] YouTube Links (%d total):\n", len(allLinks))
-	r.logf("%s\n", strings.Repeat("-", 60))
-	for _, link := range allLinks {
-		r.logf("%s\n", link)
+	// A failed campaign is an error, so the caller does not record this run
+	// for --after last and the next run covers the posts it missed.
+	if len(failures) > 0 {
+		return fmt.Errorf("%d campaign(s) failed: %s", len(failures), strings.Join(failures, "; "))
 	}
-	r.logf("%s\n", strings.Repeat("-", 60))
-
 	return nil
 }
 
