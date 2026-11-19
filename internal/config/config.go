@@ -26,6 +26,9 @@ type Config struct {
 	PublishedAfter    string          `json:"published_after,omitempty"`      // Filter posts after this local date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm[:ss])
 	RequestDelayMinMs int             `json:"request_delay_min_ms,omitempty"` // Minimum delay between requests in ms (default: 1000, min: 1000)
 	RequestDelayMaxMs int             `json:"request_delay_max_ms,omitempty"` // Maximum delay between requests in ms (default: 3000)
+	// CompanionAPIToken is the secret for --push-token. The COMPANION_API_TOKEN
+	// environment variable overrides it.
+	CompanionAPIToken string `json:"companion_api_token,omitempty"`
 }
 
 // DefaultConfigPath returns the default config file path

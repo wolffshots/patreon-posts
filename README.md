@@ -125,6 +125,7 @@ Add `--json` to run headless from another program. Stdout then holds one JSON do
 | `--extract-links` | `false` | Run in batch extraction mode instead of TUI |
 | `--force-refresh` | `false` | Re-fetch post details even if already cached (used with `--extract-links`) |
 | `--json` | `false` | Print the links as JSON on stdout and logs on stderr (needs `--extract-links`) |
+| `--push-token` | `""` | Push the Patreon session to a ta-companion token endpoint at this base URL, then exit |
 | `--version` | `false` | Print the version and exit |
 
 ### Configuration
@@ -150,6 +151,7 @@ Create a config file at `~/.patreon-posts.json`:
 | `campaigns` | Optional list of campaign seeds. These are saved into the database and appear in the TUI selection list on first launch |
 | `request_delay_min_ms` | Minimum random delay (ms) between API requests in `--extract-links` mode (default 500) |
 | `request_delay_max_ms` | Maximum random delay (ms) between API requests in `--extract-links` mode (default 1500) |
+| `companion_api_token` | Optional. Secret for `--push-token`. The `COMPANION_API_TOKEN` environment variable overrides it |
 
 Campaigns added through the TUI are persisted in the SQLite database and do not need to be listed in the config file.
 
@@ -181,6 +183,29 @@ puts them out of reach of an external reader.
 
 For a container, set `"type": "env"` and pass the header in the `PATREON_COOKIES`
 environment variable instead.
+
+### Push the Session to ta-companion
+
+[ta-companion](https://github.com/wolffshots/ta-companion) runs this app on a
+server and keeps its own copy of the Patreon session. To replace that copy with
+the session from your browser, run:
+
+```bash
+./patreon-posts --push-token http://server:4304
+```
+
+The command reads the session as a normal run does, sends it with
+`PUT <url>/patreon/token`, and exits. It does not open the database or call
+Patreon.
+
+- The secret comes from the `COMPANION_API_TOKEN` environment variable, or from
+  `companion_api_token` in the config file. It must match `COMPANION_API_TOKEN`
+  on the server.
+- When `cookie_source` is set and the browser has no Patreon session, the
+  command pushes nothing and exits 1. A stale stored session never replaces the
+  one on the server.
+- The command exits 1 when the server rejects the push. A 401 means that the
+  secret does not match.
 
 ### Rate Limits
 
