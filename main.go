@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,6 +32,7 @@ func main() {
 	forceRefresh := flag.Bool("force-refresh", false, "Force refresh post details when running --extract-links")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
 	jsonOut := flag.Bool("json", false, "With --extract-links, print the links as JSON on stdout and send all logs to stderr")
+	pushURL := flag.String("push-token", "", "Push the Patreon session to a ta-companion token endpoint at this base URL, then exit")
 	flag.Parse()
 
 	if *showVersion {
@@ -71,7 +73,9 @@ func main() {
 
 	// Resolve cookies: an explicit flag wins, then a browser profile, then the
 	// value stored in the config by a previous run.
+	fresh := false // the session came from the flag or the browser, not the stored value
 	if *cookiesFlag != "" {
+		fresh = true
 		cfg.Cookies = *cookiesFlag
 	} else if cfg.CookieSource != nil {
 		jar, err := cookies.Resolve(*cfg.CookieSource)
@@ -82,6 +86,7 @@ func main() {
 				fmt.Fprintln(os.Stderr, "   Falling back to the cookies stored in the config.")
 			}
 		case jar.Header != "":
+			fresh = true
 			describeJar(jar)
 			// Persist so a later run still works if the browser is unavailable.
 			if jar.Header != cfg.Cookies {
@@ -93,6 +98,11 @@ func main() {
 				}
 			}
 		}
+	}
+
+	if *pushURL != "" {
+		pushToken(cfg, *pushURL, fresh)
+		return
 	}
 
 	// Determine database path
@@ -224,6 +234,25 @@ func describeJar(jar cookies.Jar) {
 		fmt.Printf("⚠️  Patreon session expires %s (~%d day(s)); sign in again in your browser soon.\n",
 			datetime.FormatLocal(jar.SessionExpiry), int(left.Hours()/24))
 	}
+}
+
+// pushToken sends the resolved session to a ta-companion token endpoint and
+// exits 1 on failure. It refuses a stored session when the browser read
+// failed, so a stale value never replaces a good one on the server.
+func pushToken(cfg *config.Config, url string, fresh bool) {
+	if cfg.CookieSource != nil && !fresh {
+		fmt.Fprintln(os.Stderr, "Error: no fresh Patreon session from the browser, so nothing was pushed. Sign in to Patreon in the browser and try again.")
+		os.Exit(1)
+	}
+	secret := os.Getenv(cli.PushSecretEnv)
+	if secret == "" {
+		secret = cfg.CompanionAPIToken
+	}
+	if err := cli.PushCookies(context.Background(), nil, url, secret, cfg.Cookies); err != nil {
+		fmt.Fprintf(os.Stderr, "Error pushing the session: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✅ Pushed the Patreon session to %s\n", url)
 }
 
 func collectRunFlags() []string {
